@@ -72,7 +72,7 @@
           </button>
           <button type="button" class="kind-card" data-pick-kind="tcp">
             <span class="kind-card-title">Appareil du réseau</span>
-            <span class="kind-card-desc">Box, routeur, imprimante, caméra ou port réseau (IP)</span>
+            <span class="kind-card-desc">Box, routeur, imprimante, caméra ou port réseau</span>
           </button>
           <button type="button" class="kind-card" data-pick-kind="node_exporter">
             <span class="kind-card-title">Serveur Linux</span>
@@ -84,7 +84,7 @@
           </button>
         </div>
         <div class="modal-picker-footer">
-          <button type="button" class="inline-action" data-pick-kind="snmp_oid">Ajouter un capteur SNMP personnalisé (expert)</button>
+          <button type="button" class="inline-action" data-pick-kind="snmp_oid">Ajouter un capteur SNMP personnalisé (avancé)</button>
         </div>
       </div>
 
@@ -143,9 +143,12 @@
       <nav class="nav-tabs" role="tablist" aria-label="Navigation principale">
         <button type="button" class="nav-tab is-active" role="tab" aria-selected="true" data-tab="home">Accueil</button>
         <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="discover">Appareils</button>
-        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="friends">Mes amis</button>
+        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="friends">Amis</button>
         <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="alerts">Alertes</button>
-        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="settings">Réglages</button>
+        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="settings" id="nav-tab-settings">
+          <span>Réglages</span>
+          <span class="nav-update-dot" id="nav-update-dot" hidden aria-label="Mise à jour disponible"></span>
+        </button>
       </nav>
 
       <div class="topbar-actions">
@@ -182,7 +185,7 @@
     <div id="setup-notice" class="setup-notice" hidden>
       <div class="setup-notice-main">
         <h2>Bienvenue sur MeshWatch</h2>
-        <p id="setup-notice-detail" class="muted-copy">Donnez un nom à votre installation et cliquez sur Démarrer : vos clés privées sont créées et sauvegardées automatiquement.</p>
+        <p id="setup-notice-detail" class="muted-copy">Donnez un nom simple à votre maison ou serveur puis cliquez sur Démarrer : vos clés privées et votre réseau chiffré sont créés automatiquement.</p>
         <div class="setup-inline-form">
           <input id="setup-node-name" type="text" placeholder="Ex. mon-homelab" value="mon-homelab" aria-label="Nom de votre installation">
           <button type="button" id="quick-setup-btn" class="btn-primary">Démarrer en un clic</button>
@@ -192,20 +195,26 @@
 
     <!-- TAB 1: ACCUEIL -->
     <section class="view-panel is-active" id="view-home" data-panel="home">
-      <div class="page-head">
-        <div>
-          <h1 id="ov-headline">Chargement de votre espace</h1>
-          <p class="muted-copy" id="ov-subtitle">Supervision privée de vos appareils et entraide avec vos proches, sans ouvrir de port sur Internet.</p>
+      <div class="status-header" id="ov-status-header">
+        <div class="status-header-main">
+          <div class="status-title-row">
+            <span class="hero-dot is-ok" id="ov-hero-dot" aria-hidden="true"></span>
+            <h1 id="ov-headline">Chargement de votre espace</h1>
+          </div>
+          <p class="muted-copy" id="ov-subtitle">Supervision mutuelle et chiffrée entre amis, sans ouvrir aucun port sur Internet.</p>
         </div>
-        <button type="button" class="btn-primary" id="home-add-device-btn">Ajouter un appareil</button>
+        <div class="head-actions">
+          <button type="button" id="run-all-probes-btn" class="btn-secondary">Tout vérifier</button>
+          <button type="button" class="btn-primary" id="home-add-device-btn">Ajouter un appareil</button>
+        </div>
       </div>
 
       <!-- INTERACTIVE GETTING-STARTED CHECKLIST (AUTO-HIDES WHEN ALL 3 DONE) -->
       <section class="checklist-card" id="onboarding-card" hidden>
         <div class="checklist-head">
           <div>
-            <h2>Pour bien démarrer</h2>
-            <p class="muted-copy" id="onboarding-progress">Complétez ces 3 étapes simples directement depuis cette interface.</p>
+            <h2>Démarrer en 3 étapes simples</h2>
+            <p class="muted-copy" id="onboarding-progress">Complétez ces étapes directement depuis cette page.</p>
           </div>
           <button type="button" id="dismiss-onboarding-btn" class="inline-action">Masquer</button>
         </div>
@@ -220,113 +229,101 @@
           <button type="button" class="checklist-step" id="step-alerts" data-goto="alerts">
             <span class="step-marker" id="step-alerts-mark">2</span>
             <span class="step-copy">
-              <span class="step-title">Activer les alertes téléphone</span>
-              <span class="step-desc">Recevez une notification instantanée en cas de panne</span>
+              <span class="step-title">Activer vos alertes</span>
+              <span class="step-desc">Recevez une alerte sur votre téléphone si une panne survient</span>
             </span>
           </button>
           <button type="button" class="checklist-step" id="step-friends" data-goto="friends">
             <span class="step-marker" id="step-friends-mark">3</span>
             <span class="step-copy">
-              <span class="step-title">Inviter un ami</span>
-              <span class="step-desc">Partagez un code d'invitation unique pour vous surveiller mutuellement</span>
+              <span class="step-title">Inviter un ami de confiance</span>
+              <span class="step-desc">Veillez mutuellement sur vos maisons sans aucun serveur central</span>
             </span>
           </button>
         </div>
       </section>
 
+      <!-- SUMMARY STRIP -->
       <div class="metrics-strip" aria-label="Résumé de santé">
         <div class="metric-cell">
-          <span class="metric-label">Mes services</span>
+          <span class="metric-label">Mes appareils</span>
           <span class="metric-value tabular" id="metric-probes">0 / 0</span>
           <span class="metric-sub" id="metric-probes-sub">Aucun appareil surveillé</span>
         </div>
         <div class="metric-cell">
-          <span class="metric-label">Mes amis</span>
+          <span class="metric-label">Protection mutuelle</span>
           <span class="metric-value tabular" id="metric-peers">0 / 0</span>
-          <span class="metric-sub" id="metric-peers-sub">Invitez un ami pour commencer</span>
+          <span class="metric-sub" id="metric-peers-sub">Invitez un ami pour vous protéger</span>
         </div>
         <div class="metric-cell">
-          <span class="metric-label">Liaison sécurisée</span>
-          <span class="metric-value tabular" id="metric-relays">0 / 0</span>
-          <span class="metric-sub" id="metric-relays-sub">Échanges chiffrés actifs</span>
+          <span class="metric-label">Alertes téléphone</span>
+          <span class="metric-value" id="metric-alerts">À régler</span>
+          <div class="metric-sub-row">
+            <span class="metric-sub" id="metric-alerts-sub">Aucune alerte active</span>
+            <button type="button" class="inline-action" data-goto="alerts" id="metric-alerts-action">Configurer</button>
+          </div>
         </div>
         <div class="metric-cell">
-          <span class="metric-label">Accès Internet</span>
+          <span class="metric-label">Connexion Internet</span>
           <span class="metric-value" id="metric-wan">Connecté</span>
-          <button type="button" id="check-wan-btn" class="inline-action">Vérifier maintenant</button>
+          <div class="metric-sub-row">
+            <span class="metric-sub tabular" id="metric-wan-sub">0/0 relais</span>
+            <button type="button" id="check-wan-btn" class="inline-action">Vérifier</button>
+          </div>
         </div>
       </div>
 
+      <!-- MUTUAL WATCH NETWORK MAP -->
       <section class="band">
         <div class="band-head">
-          <h2>Votre réseau d'entraide</h2>
+          <div>
+            <h2>Comment vous êtes protégé</h2>
+            <p class="band-meta" id="ov-mutual-explain">Vos appareils sont vérifiés localement, puis un signal chiffré est envoyé à vos amis.</p>
+          </div>
           <span class="band-meta tabular" id="ov-uptime">Actif depuis 0s</span>
         </div>
         <div class="topology-stage">
-          <svg id="topology-svg" class="topology-svg" viewBox="0 0 960 250" role="img" aria-label="Carte en direct de votre installation et de vos amis"></svg>
+          <svg id="topology-svg" class="topology-svg" viewBox="0 0 960 230" role="img" aria-label="Carte en direct de votre installation et de vos amis"></svg>
         </div>
       </section>
 
+      <!-- SERVICES SURVEILLÉS -->
       <section class="band">
         <div class="band-head">
-          <h2>Mes services surveillés</h2>
+          <h2>Mes appareils surveillés</h2>
           <button type="button" class="inline-action" data-goto="discover">Gérer mes appareils</button>
         </div>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Service</th>
-                <th>État</th>
-                <th>Historique</th>
-                <th>Détail</th>
-                <th class="num-col">Réponse</th>
-                <th class="num-col">Action</th>
-              </tr>
-            </thead>
-            <tbody id="ov-probes-body"></tbody>
-          </table>
-        </div>
+        <div id="ov-probes-list" class="surface-list"></div>
       </section>
 
+      <!-- CHEZ MES AMIS -->
       <section class="band">
         <div class="band-head">
           <h2>Chez mes amis</h2>
           <button type="button" class="inline-action" data-goto="friends">Gérer mes amis</button>
         </div>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Ami</th>
-                <th>État</th>
-                <th>Disponibilité</th>
-                <th>Dernières nouvelles</th>
-              </tr>
-            </thead>
-            <tbody id="ov-peers-body"></tbody>
-          </table>
-        </div>
+        <div id="ov-peers-list" class="surface-list"></div>
       </section>
 
-      <section class="band" id="incidents-band" hidden>
+      <!-- ACTIVITÉ RÉCENTE -->
+      <section class="band" id="incidents-band">
         <div class="band-head">
           <h2>Activité récente</h2>
-          <span class="band-meta" id="incidents-count"></span>
+          <span class="band-meta tabular" id="incidents-count"></span>
         </div>
-        <div id="ov-incidents-list" class="discover-list"></div>
+        <div id="ov-incidents-list" class="surface-list"></div>
       </section>
     </section>
 
-    <!-- TAB 2: APPAREILS & DÉCOUVERTE -->
+    <!-- TAB 2: MES APPAREILS -->
     <section class="view-panel" id="view-discover" data-panel="discover" hidden>
       <div class="page-head">
         <div>
-          <h1>Appareils et services</h1>
-          <p class="muted-copy">Cochez vos conteneurs Docker, scannez votre réseau local ou ajoutez un appareil manuellement : tout est enregistré instantanément.</p>
+          <h1>Mes appareils et services</h1>
+          <p class="muted-copy">Cochez vos applications Docker, scannez votre réseau local ou ajoutez un appareil manuellement en quelques secondes.</p>
         </div>
         <div class="sub-tabs" role="tablist" aria-label="Mode de gestion des appareils">
-          <button type="button" class="sub-tab is-active" role="tab" aria-selected="true" data-subtab="docker">Conteneurs Docker</button>
+          <button type="button" class="sub-tab is-active" role="tab" aria-selected="true" data-subtab="docker">Applications Docker</button>
           <button type="button" class="sub-tab" role="tab" aria-selected="false" data-subtab="lan">Scanner mon réseau</button>
           <button type="button" class="sub-tab" role="tab" aria-selected="false" data-subtab="managed" id="subtab-managed-btn">Mes services</button>
         </div>
@@ -342,14 +339,14 @@
             </label>
           </div>
           <div class="scan-bar-actions">
-            <button type="button" id="docker-select-running-btn" class="inline-action">Cocher tous les actifs</button>
+            <button type="button" id="docker-select-running-btn" class="inline-action">Tout cocher</button>
             <button type="button" id="scan-docker-btn" class="btn-secondary">Actualiser</button>
             <button type="button" id="apply-docker-btn" class="btn-primary">Enregistrer (0)</button>
           </div>
         </div>
 
         <p id="docker-scan-meta" class="muted-copy scan-meta">Recherche des applications Docker sur cette machine...</p>
-        <div id="docker-containers-list" class="discover-list"></div>
+        <div id="docker-containers-list" class="surface-list"></div>
       </div>
 
       <!-- SUBTAB B: LAN SCAN -->
@@ -371,21 +368,21 @@
         </div>
 
         <p id="lan-scan-meta" class="muted-copy scan-meta">Cliquez sur Scanner mon réseau pour trouver automatiquement vos NAS Synology, serveurs et applications web.</p>
-        <div id="lan-results-list" class="discover-list"></div>
+        <div id="lan-results-list" class="surface-list"></div>
       </div>
 
       <!-- SUBTAB C: MANAGED SERVICES -->
       <div class="sub-panel" data-subpanel="managed" hidden>
         <div class="scan-bar">
           <div class="scan-bar-inputs">
-            <p class="muted-copy">Testez, modifiez ou ajoutez n'importe quel site, NAS, serveur ou appareil de votre réseau.</p>
+            <p class="muted-copy">Testez en direct, modifiez ou ajoutez n'importe quel site web, NAS Synology, serveur Linux ou PC Windows.</p>
           </div>
           <div class="scan-bar-actions">
-            <button type="button" id="open-add-probe-btn" class="btn-primary">Ajouter manuellement</button>
+            <button type="button" id="open-add-probe-btn" class="btn-primary">Ajouter un appareil</button>
           </div>
         </div>
 
-        <div id="managed-probes-list" class="discover-list managed-list"></div>
+        <div id="managed-probes-list" class="surface-list"></div>
       </div>
     </section>
 
@@ -393,36 +390,36 @@
     <section class="view-panel" id="view-friends" data-panel="friends" hidden>
       <div class="page-head">
         <div>
-          <h1>Mes amis</h1>
-          <p class="muted-copy">Partagez un simple code d'invitation avec vos proches pour être prévenu si leur connexion ou leur serveur tombe en panne.</p>
+          <h1>Mes amis et entraide</h1>
+          <p class="muted-copy">Si votre box Internet ou votre serveur tombe en panne, vos amis détectent votre silence et vous préviennent sur votre téléphone.</p>
         </div>
       </div>
 
       <div class="friends-grid">
         <!-- SHARE MY INVITE -->
         <section class="card-panel">
-          <h2>1. Inviter un ami</h2>
-          <p class="muted-copy">Copiez ce code unique et envoyez-le à votre ami par WhatsApp, Signal ou iMessage.</p>
+          <h2>Partager mon invitation</h2>
+          <p class="muted-copy">Copiez ce code personnel et envoyez-le à votre ami par WhatsApp, Signal ou iMessage.</p>
           <div class="invite-box">
             <input id="my-invite-code" type="text" class="mono" readonly placeholder="Votre code d'invitation apparaîtra ici">
             <button type="button" id="copy-invite-btn" class="btn-primary">Copier mon invitation</button>
           </div>
           <label class="checkbox-line">
             <input id="invite-include-group" type="checkbox" checked>
-            <span>Inclure la clé secrète de mon groupe (recommandé pour connecter un nouvel ami en 1 clic)</span>
+            <span>Inclure la clé secrète de mon groupe privé (recommandé en 1 clic)</span>
           </label>
         </section>
 
         <!-- PASTE FRIEND INVITE -->
         <section class="card-panel">
-          <h2>2. Ajouter l'invitation d'un ami</h2>
-          <p class="muted-copy">Collez le code reçu de votre ami : son nom et ses identifiants sont remplis et enregistrés automatiquement.</p>
+          <h2>Ajouter l'invitation d'un ami</h2>
+          <p class="muted-copy">Collez le code reçu de votre ami : son nom et son identifiant sont ajoutés et enregistrés en un clic.</p>
           <label class="field">
             <span class="field-label">Code d'invitation reçu</span>
             <input id="friend-invite-input" type="text" class="mono" placeholder="Collez un code MW1-... ici">
           </label>
           <div id="friend-invite-preview" class="invite-preview" hidden>
-            <p class="cell-primary" id="friend-invite-name"></p>
+            <p class="row-title" id="friend-invite-name"></p>
             <label class="checkbox-line" id="friend-join-group-wrap" hidden>
               <input id="friend-join-group" type="checkbox">
               <span id="friend-join-group-label">Rejoindre aussi son groupe privé chiffré</span>
@@ -437,10 +434,10 @@
 
       <section class="band">
         <div class="band-head">
-          <h2>Amis connectés</h2>
+          <h2>Amis dans mon groupe</h2>
           <span class="band-meta tabular" id="peers-count-label">0 ami</span>
         </div>
-        <div id="peers-list" class="discover-list"></div>
+        <div id="peers-list" class="surface-list"></div>
       </section>
 
       <section class="band">
@@ -473,7 +470,7 @@
       <div class="page-head">
         <div>
           <h1>Vos alertes</h1>
-          <p class="muted-copy">Choisissez comment recevoir une notification instantanée dès qu'un service ou un ami ne répond plus.</p>
+          <p class="muted-copy">Choisissez où recevoir une alerte lorsqu'un ami devient injoignable ou signale une panne.</p>
         </div>
         <div class="head-actions">
           <button type="button" id="test-notify-btn" class="btn-secondary">Envoyer une alerte de test</button>
@@ -484,10 +481,10 @@
       <div id="test-notify-output" class="test-output" hidden></div>
 
       <section class="card-panel section-card">
-        <div class="band-head card-head-tight">
+        <div class="card-head-row">
           <div>
             <h2>Notifications sur téléphone (ntfy)</h2>
-            <p class="muted-copy">Gratuit, sans compte, fonctionne sur iPhone et Android.</p>
+            <p class="muted-copy">Gratuit, sans inscription, fonctionne instantanément sur iPhone et Android.</p>
           </div>
           <label class="switch-control">
             <input id="cfg-ntfy-enabled" type="checkbox">
@@ -498,8 +495,8 @@
 
         <ol class="guide-steps">
           <li>Installez l'application gratuite <strong>ntfy</strong> sur votre téléphone (App Store ou Google Play).</li>
-          <li>Cliquez sur <strong>Créer un canal privé</strong> ci-dessous (ou entrez votre propre canal) puis abonnez-vous à ce nom dans l'app.</li>
-          <li>Cliquez sur <strong>Envoyer une alerte de test</strong> en haut pour vérifier que votre téléphone sonne.</li>
+          <li>Cliquez sur <strong>Créer un canal privé</strong> puis abonnez-vous à ce nom dans l'application ntfy.</li>
+          <li>Cliquez sur <strong>Envoyer une alerte de test</strong> en haut pour vérifier la réception.</li>
         </ol>
 
         <div class="form-grid two-col">
@@ -524,7 +521,7 @@
           <summary>Options ntfy avancées</summary>
           <div class="form-grid two-col fold-body">
             <label class="field">
-              <span class="field-label">Nom du topic séparé (si non inclus dans l'adresse)</span>
+              <span class="field-label">Nom du canal séparé (si non inclus dans l'adresse)</span>
               <input id="cfg-ntfy-topic" type="text" class="mono" placeholder="Laisser vide dans la majorité des cas">
             </label>
           </div>
@@ -532,10 +529,10 @@
       </section>
 
       <section class="card-panel section-card">
-        <div class="band-head card-head-tight">
+        <div class="card-head-row">
           <div>
             <h2>Messages iMessage (Photon)</h2>
-            <p class="muted-copy">Compatible avec Photon Cloud (app.photon.codes) et Photon HTTP Proxy (imessage-swagger.photon.codes).</p>
+            <p class="muted-copy">Compatible avec Photon Cloud (app.photon.codes) et Photon HTTP Proxy (serveur Mac).</p>
           </div>
           <label class="switch-control">
             <input id="cfg-photon-enabled" type="checkbox">
@@ -548,7 +545,7 @@
           <label class="field span-2">
             <span class="field-label">Mode de connexion Photon</span>
             <select id="cfg-photon-mode">
-              <option value="cloud">Photon Cloud (app.photon.codes · Project ID + Clé API)</option>
+              <option value="cloud">Photon Cloud (app.photon.codes : Project ID + Clé API)</option>
               <option value="proxy">Photon HTTP Proxy (serveur Mac / imessage-swagger.photon.codes)</option>
               <option value="custom">Webhook HTTP personnalisé</option>
             </select>
@@ -558,11 +555,11 @@
         <!-- MODE CLOUD -->
         <div id="photon-mode-cloud">
           <ol class="guide-steps">
-            <li>Sur <strong>app.beta.photon.codes</strong>, ouvrez votre projet, allez dans <strong>iMessage</strong> et assignez une ligne à votre numéro ou email Apple.</li>
-            <li>Envoyez un premier message iMessage depuis votre iPhone vers cette ligne (requis pour les lignes partagées).</li>
-            <li>Collez votre <strong>Project ID</strong> (<code>pho_prj_...</code>), votre <strong>Clé API</strong> (<code>pho_sk_...</code>) et votre numéro/email ci-dessous.</li>
+            <li>Sur <strong>app.beta.photon.codes</strong>, assignez une ligne iMessage à votre numéro ou email Apple.</li>
+            <li>Envoyez un premier message iMessage depuis votre iPhone vers cette ligne.</li>
+            <li>Collez votre <strong>Project ID</strong> (<span class="mono-inline">pho_prj_...</span>), votre <strong>Clé API</strong> (<span class="mono-inline">pho_sk_...</span>) et votre destinataire ci-dessous.</li>
           </ol>
-          <div class="form-grid three-col" style="margin-top:14px;">
+          <div class="form-grid three-col">
             <label class="field">
               <span class="field-label">Project ID Photon</span>
               <input id="cfg-photon-project-id" type="text" class="mono" placeholder="pho_prj_...">
@@ -575,7 +572,7 @@
               </div>
             </div>
             <label class="field">
-              <span class="field-label">Votre numéro ou email iMessage</span>
+              <span class="field-label">Numéro ou email iMessage</span>
               <input id="cfg-photon-recipient" type="text" class="mono" placeholder="+33600000000 ou nom@icloud.com">
             </label>
           </div>
@@ -587,24 +584,24 @@
                 <input id="cfg-photon-cloud-url" type="url" class="mono" placeholder="https://api.photon.codes/v1">
               </label>
               <label class="field">
-                <span class="field-label">Sender ID (optionnel, détecté auto)</span>
+                <span class="field-label">Sender ID (détecté auto)</span>
                 <input id="cfg-photon-sender-id" type="text" class="mono" placeholder="pho_usr_...">
               </label>
               <label class="field">
-                <span class="field-label">Space ID (optionnel, détecté auto)</span>
+                <span class="field-label">Space ID (détecté auto)</span>
                 <input id="cfg-photon-space-id" type="text" class="mono" placeholder="pho_spc_...">
               </label>
             </div>
           </details>
         </div>
 
-        <!-- MODE PROXY (Advanced iMessage HTTP Proxy) -->
+        <!-- MODE PROXY -->
         <div id="photon-mode-proxy" hidden>
           <ol class="guide-steps">
-            <li>Indiquez l'adresse et la clé API de votre serveur <strong>Advanced iMessage Kit</strong> (MeshWatch génère automatiquement le jeton Base64 requis).</li>
-            <li>Indiquez le destinataire : numéro (<code>+336...</code>), email Apple ou groupe (<code>group:...</code>).</li>
+            <li>Indiquez l'adresse et la clé API de votre serveur <strong>Advanced iMessage Kit</strong>.</li>
+            <li>Indiquez le destinataire : numéro (<span class="mono-inline">+336...</span>), email Apple ou groupe (<span class="mono-inline">group:...</span>).</li>
           </ol>
-          <div class="form-grid three-col" style="margin-top:14px;">
+          <div class="form-grid three-col">
             <label class="field">
               <span class="field-label">URL de votre serveur Mac</span>
               <input id="cfg-photon-server-url" type="url" class="mono" placeholder="https://mon-serveur-imessage.exemple.com">
@@ -612,17 +609,17 @@
             <div class="field">
               <span class="field-label">Clé API du serveur</span>
               <div class="input-with-action">
-                <input id="cfg-photon-proxy-key" type="password" class="mono" autocomplete="off" placeholder="Clé API Advanced iMessage Kit">
+                <input id="cfg-photon-proxy-key" type="password" class="mono" autocomplete="off" placeholder="Clé API serveur">
                 <button type="button" class="field-action" data-toggle-secret="cfg-photon-proxy-key">Afficher</button>
               </div>
             </div>
             <label class="field">
-              <span class="field-label">Destinataire (to)</span>
+              <span class="field-label">Destinataire</span>
               <input id="cfg-photon-proxy-recipient" type="text" class="mono" placeholder="+33600000000 ou nom@icloud.com">
             </label>
           </div>
           <details class="advanced-fold">
-            <summary>Options avancées Proxy (URL proxy auto-hébergé ou jeton Base64 direct)</summary>
+            <summary>Options avancées Proxy (URL proxy ou jeton Base64 direct)</summary>
             <div class="form-grid two-col fold-body">
               <label class="field">
                 <span class="field-label">URL du HTTP Proxy</span>
@@ -631,7 +628,7 @@
               <div class="field">
                 <span class="field-label">Jeton Base64 pré-généré (optionnel)</span>
                 <div class="input-with-action">
-                  <input id="cfg-photon-proxy-token" type="password" class="mono" autocomplete="off" placeholder="Remplace serveur + clé si rempli">
+                  <input id="cfg-photon-proxy-token" type="password" class="mono" autocomplete="off" placeholder="Remplace serveur et clé si rempli">
                   <button type="button" class="field-action" data-toggle-secret="cfg-photon-proxy-token">Afficher</button>
                 </div>
               </div>
@@ -680,13 +677,13 @@
       <div class="page-head">
         <div>
           <h1>Réglages et mises à jour</h1>
-          <p class="muted-copy">Tout se règle et s'enregistre directement ici, sans aucun fichier de configuration à éditer.</p>
+          <p class="muted-copy">Tout se règle et s'enregistre directement ici, sans aucun fichier à éditer.</p>
         </div>
         <button type="button" id="save-settings-btn" class="btn-primary">Enregistrer</button>
       </div>
 
       <section class="card-panel section-card">
-        <div class="band-head card-head-tight">
+        <div class="card-head-row">
           <h2>Votre installation</h2>
         </div>
         <div class="form-grid three-col">
@@ -716,13 +713,13 @@
       </section>
 
       <section class="card-panel section-card">
-        <div class="band-head card-head-tight">
+        <div class="card-head-row">
           <h2>Version et mise à jour</h2>
           <span class="band-meta mono-inline" id="settings-version-label">Version en cours</span>
         </div>
         <div class="update-box-inline">
           <div>
-            <p class="cell-primary" id="settings-update-headline">Vérification de la version...</p>
+            <p class="row-title" id="settings-update-headline">Vérification de la version...</p>
             <p class="muted-copy" id="settings-update-detail"></p>
           </div>
           <div class="update-box-actions">
@@ -733,7 +730,7 @@
       </section>
 
       <section class="card-panel section-card">
-        <div class="band-head card-head-tight">
+        <div class="card-head-row">
           <h2>Sauvegarde et restauration</h2>
           <span class="status-cell is-ok" id="settings-storage-status"><span class="status-dot is-ok"></span>Enregistrement automatique actif</span>
         </div>
@@ -747,7 +744,7 @@
 
       <section class="band">
         <details class="advanced-fold">
-          <summary>Paramètres experts (relais réseau, test Internet, journalisation et clés)</summary>
+          <summary>Paramètres avancés (relais réseau, test Internet, journalisation et clés)</summary>
           <div class="fold-body">
             <div class="form-grid two-col">
               <div class="field">
@@ -773,7 +770,7 @@
                 <textarea id="cfg-automute-targets" rows="4" class="mono" spellcheck="false"></textarea>
               </label>
               <label class="field">
-                <span class="field-label">Timeout du test Internet</span>
+                <span class="field-label">Délai du test Internet</span>
                 <input id="cfg-automute-timeout" type="text" class="mono" placeholder="3s">
               </label>
               <label class="field">

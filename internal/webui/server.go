@@ -41,28 +41,31 @@ type NotificationsStatus struct {
 
 // RuntimeStatus is the live snapshot returned by GET /api/status.
 type RuntimeStatus struct {
-	Mode            string                  `json:"mode"`
-	SetupError      string                  `json:"setup_error,omitempty"`
-	Version         string                  `json:"version"`
-	Commit          string                  `json:"commit"`
-	ConfigPath      string                  `json:"config_path"`
-	ConfigWritable  bool                    `json:"config_writable"`
-	NodeName        string                  `json:"node_name"`
-	PublicKeyHex    string                  `json:"pubkey_hex"`
-	TopicTag        string                  `json:"topic_tag"`
-	StartedAt       time.Time               `json:"started_at"`
-	UptimeSec       int64                   `json:"uptime_sec"`
-	HeartbeatSec    int64                   `json:"heartbeat_interval_sec"`
-	PeerTimeoutSec  int64                   `json:"peer_timeout_sec"`
-	OverallOK       bool                    `json:"overall_ok"`
-	Muted           bool                    `json:"muted"`
-	AutoMuteTargets []string                `json:"auto_mute_targets"`
-	Relays          []transport.RelayStatus          `json:"relays"`
-	Probes          []probes.ProbeResult             `json:"probes"`
-	ProbeHistory    map[string][]probes.HistoryPoint `json:"probe_history,omitempty"`
-	Peers           []quorum.PeerStatus              `json:"peers"`
-	Incidents       []probes.IncidentEvent           `json:"incidents,omitempty"`
-	Notifications   NotificationsStatus              `json:"notifications"`
+	Mode             string                           `json:"mode"`
+	SetupError       string                           `json:"setup_error,omitempty"`
+	Version          string                           `json:"version"`
+	Commit           string                           `json:"commit"`
+	BuildDate        string                           `json:"build_date,omitempty"`
+	ConfigPath       string                           `json:"config_path"`
+	ConfigWritable   bool                             `json:"config_writable"`
+	NodeName         string                           `json:"node_name"`
+	PublicKeyHex     string                           `json:"pubkey_hex"`
+	TopicTag         string                           `json:"topic_tag"`
+	StartedAt        time.Time                        `json:"started_at"`
+	LastHeartbeatAt  *time.Time                       `json:"last_heartbeat_at,omitempty"`
+	UptimeSec        int64                            `json:"uptime_sec"`
+	HeartbeatSec     int64                            `json:"heartbeat_interval_sec"`
+	PeerTimeoutSec   int64                            `json:"peer_timeout_sec"`
+	OverallOK        bool                             `json:"overall_ok"`
+	Muted            bool                             `json:"muted"`
+	ProtectedByCount int                              `json:"protected_by_count"`
+	AutoMuteTargets  []string                         `json:"auto_mute_targets"`
+	Relays           []transport.RelayStatus          `json:"relays"`
+	Probes           []probes.ProbeResult             `json:"probes"`
+	ProbeHistory     map[string][]probes.HistoryPoint `json:"probe_history,omitempty"`
+	Peers            []quorum.PeerStatus              `json:"peers"`
+	Incidents        []probes.IncidentEvent           `json:"incidents,omitempty"`
+	Notifications    NotificationsStatus              `json:"notifications"`
 }
 
 // RuntimeController bridges the embedded HTTP UI to the running MeshWatch agent.
@@ -71,6 +74,7 @@ type RuntimeController interface {
 	CurrentConfig() (*config.Config, string)
 	ApplyConfig(ctx context.Context, rawYAML []byte, parsed *config.Config) error
 	CheckAutoMute(ctx context.Context) (bool, error)
+	RunProbesNow(ctx context.Context) ([]probes.ProbeResult, bool, error)
 }
 
 // ServerConfig configures the opt-in local HTTP configuration UI.
@@ -132,6 +136,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	mux.HandleFunc("POST /api/keygen", s.requireAuth(s.requireJSON(s.handleKeygen)))
 	mux.HandleFunc("POST /api/test-notify", s.requireAuth(s.requireJSON(s.handleTestNotify)))
 	mux.HandleFunc("POST /api/probes/test", s.requireAuth(s.requireJSON(s.handleTestProbe)))
+	mux.HandleFunc("POST /api/probes/run", s.requireAuth(s.requireJSON(s.handleRunProbes)))
 	mux.HandleFunc("POST /api/check-automute", s.requireAuth(s.requireJSON(s.handleCheckAutoMute)))
 	mux.HandleFunc("GET /api/discover/info", s.requireAuth(s.handleDiscoverInfo))
 	mux.HandleFunc("POST /api/discover/docker", s.requireAuth(s.requireJSON(s.handleDiscoverDocker)))
@@ -265,6 +270,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if st.Commit == "" {
 		st.Commit = version.ShortCommit()
+	}
+	if st.BuildDate == "" {
+		st.BuildDate = version.BuildDate
 	}
 	if st.Relays == nil {
 		st.Relays = []transport.RelayStatus{}
@@ -592,6 +600,21 @@ func (s *Server) handleTestProbe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) handleRunProbes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	results, overallOK, err := s.controller.RunProbesNow(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"overall_ok": overallOK,
+		"probes":     results,
+	})
+}
+
 func (s *Server) handleCheckAutoMute(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -796,6 +819,9 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(3 * time.Minute))
+
 	var req struct {
 		Image string `json:"image,omitempty"`
 	}

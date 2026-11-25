@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -214,14 +215,15 @@ func cmdRun(args []string, stdout, stderr io.Writer) error {
 }
 
 type runningInstance struct {
-	cfg       *config.Config
-	cipher    *mwcrypto.Cipher
-	scheduler *probes.Scheduler
-	pool      *transport.Pool
-	engine    *quorum.Engine
-	startedAt time.Time
-	cancel    context.CancelFunc
-	done      chan struct{}
+	cfg               *config.Config
+	cipher            *mwcrypto.Cipher
+	scheduler         *probes.Scheduler
+	pool              *transport.Pool
+	engine            *quorum.Engine
+	startedAt         time.Time
+	lastHeartbeatUnix atomic.Int64
+	cancel            context.CancelFunc
+	done              chan struct{}
 }
 
 type agentManager struct {
@@ -398,27 +400,7 @@ func runInstanceLoop(ctx context.Context, inst *runningInstance, logger *slog.Lo
 	initCancel()
 
 	publishHeartbeat := func() {
-		results, overallOK := inst.scheduler.Snapshot()
-		hb := transport.HeartbeatPayload{
-			Type:      transport.TypeHeartbeat,
-			NodeName:  cfg.Node.Name,
-			TS:        time.Now().Unix(),
-			UptimeSec: int64(time.Since(inst.startedAt).Seconds()),
-			OverallOK: overallOK,
-			Probes:    results,
-		}
-		pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if evID, err := inst.pool.PublishHeartbeat(pubCtx, hb); err != nil {
-			logger.Warn("failed to publish heartbeat", "err", err)
-		} else {
-			logger.Debug("heartbeat published",
-				"event_id", evID,
-				"overall_ok", overallOK,
-				"probes", len(results),
-				"connected_relays", inst.pool.ConnectedRelays(),
-			)
-		}
+		inst.publishHeartbeatNow(ctx, logger)
 	}
 
 	if ctx.Err() == nil && inst.pool.ConnectedRelays() > 0 {
@@ -470,6 +452,19 @@ func (m *agentManager) Status() webui.RuntimeStatus {
 	}
 
 	probeResults, overallOK := inst.scheduler.Snapshot()
+	peers := inst.engine.PeerStatuses()
+	protectedBy := 0
+	for _, p := range peers {
+		if p.Online {
+			protectedBy++
+		}
+	}
+	var lastHB *time.Time
+	if ts := inst.lastHeartbeatUnix.Load(); ts > 0 {
+		t := time.Unix(ts, 0).UTC()
+		lastHB = &t
+	}
+
 	incidents := append(inst.scheduler.Incidents(), inst.engine.Incidents()...)
 	sort.Slice(incidents, func(i, j int) bool {
 		return incidents[i].TS > incidents[j].TS
@@ -479,29 +474,76 @@ func (m *agentManager) Status() webui.RuntimeStatus {
 	}
 
 	return webui.RuntimeStatus{
-		Mode:            "running",
-		ConfigPath:      m.configPath,
-		ConfigWritable:  webui.IsConfigPathWritable(m.configPath),
-		NodeName:        inst.cfg.Node.Name,
-		PublicKeyHex:    inst.cfg.Node.PublicKeyHex,
-		TopicTag:        inst.cipher.TopicTag(),
-		StartedAt:       inst.startedAt,
-		UptimeSec:       int64(time.Since(inst.startedAt).Seconds()),
-		HeartbeatSec:    int64(inst.cfg.Node.HeartbeatInterval.Seconds()),
-		PeerTimeoutSec:  int64(inst.cfg.Node.PeerTimeout.Seconds()),
-		OverallOK:       overallOK,
-		Muted:           inst.engine.IsMuted(),
-		AutoMuteTargets: append([]string(nil), inst.cfg.AutoMute.Targets...),
-		Relays:          inst.pool.RelayStatuses(),
-		Probes:          probeResults,
-		ProbeHistory:    inst.scheduler.HistorySnapshot(),
-		Peers:           inst.engine.PeerStatuses(),
-		Incidents:       incidents,
+		Mode:             "running",
+		ConfigPath:       m.configPath,
+		ConfigWritable:   webui.IsConfigPathWritable(m.configPath),
+		NodeName:         inst.cfg.Node.Name,
+		PublicKeyHex:     inst.cfg.Node.PublicKeyHex,
+		TopicTag:         inst.cipher.TopicTag(),
+		StartedAt:        inst.startedAt,
+		LastHeartbeatAt:  lastHB,
+		UptimeSec:        int64(time.Since(inst.startedAt).Seconds()),
+		HeartbeatSec:     int64(inst.cfg.Node.HeartbeatInterval.Seconds()),
+		PeerTimeoutSec:   int64(inst.cfg.Node.PeerTimeout.Seconds()),
+		OverallOK:        overallOK,
+		Muted:            inst.engine.IsMuted(),
+		ProtectedByCount: protectedBy,
+		AutoMuteTargets:  append([]string(nil), inst.cfg.AutoMute.Targets...),
+		Relays:           inst.pool.RelayStatuses(),
+		Probes:           probeResults,
+		ProbeHistory:     inst.scheduler.HistorySnapshot(),
+		Peers:            peers,
+		Incidents:        incidents,
 		Notifications: webui.NotificationsStatus{
 			NtfyEnabled:   inst.cfg.Notifications.Ntfy.Enabled,
 			PhotonEnabled: inst.cfg.Notifications.PhotonIMessage.Enabled,
 		},
 	}
+}
+
+func (inst *runningInstance) publishHeartbeatNow(ctx context.Context, logger *slog.Logger) {
+	results, overallOK := inst.scheduler.Snapshot()
+	hb := transport.HeartbeatPayload{
+		Type:      transport.TypeHeartbeat,
+		NodeName:  inst.cfg.Node.Name,
+		TS:        time.Now().Unix(),
+		UptimeSec: int64(time.Since(inst.startedAt).Seconds()),
+		OverallOK: overallOK,
+		Probes:    results,
+	}
+	pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if evID, err := inst.pool.PublishHeartbeat(pubCtx, hb); err != nil {
+		if logger != nil {
+			logger.Warn("failed to publish heartbeat", "err", err)
+		}
+	} else {
+		inst.lastHeartbeatUnix.Store(time.Now().Unix())
+		if logger != nil {
+			logger.Debug("heartbeat published",
+				"event_id", evID,
+				"overall_ok", overallOK,
+				"probes", len(results),
+				"connected_relays", inst.pool.ConnectedRelays(),
+			)
+		}
+	}
+}
+
+func (m *agentManager) RunProbesNow(ctx context.Context) ([]probes.ProbeResult, bool, error) {
+	m.mu.Lock()
+	inst := m.inst
+	logger := m.logger
+	m.mu.Unlock()
+
+	if inst == nil {
+		return nil, false, errors.New("agent en mode initialisation : enregistrez d'abord une configuration valide")
+	}
+	results, overallOK := inst.scheduler.RunNow(ctx)
+	if inst.pool != nil && inst.pool.ConnectedRelays() > 0 {
+		go inst.publishHeartbeatNow(m.parentCtx, logger)
+	}
+	return results, overallOK, nil
 }
 
 func (m *agentManager) CheckAutoMute(ctx context.Context) (bool, error) {

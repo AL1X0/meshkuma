@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,44 +23,50 @@ import (
 
 const defaultCacheTTL = 15 * time.Minute
 
-// CheckResult describes whether a newer MeshWatch version is available on GitHub.
+// CheckResult describes whether a newer MeshWatch version is available via GHCR or GitHub.
 type CheckResult struct {
-	CurrentVersion  string    `json:"current_version"`
-	CurrentCommit   string    `json:"current_commit"`
-	LatestVersion   string    `json:"latest_version"`
-	LatestCommit    string    `json:"latest_commit,omitempty"`
-	UpdateAvailable bool      `json:"update_available"`
-	Building        bool      `json:"building,omitempty"`
-	ReleaseName     string    `json:"release_name,omitempty"`
-	ReleaseNotes    string    `json:"release_notes,omitempty"`
-	ReleaseURL      string    `json:"release_url,omitempty"`
-	CanAutoUpdate   bool      `json:"can_auto_update"`
-	UpdateMethod    string    `json:"update_method"` // "docker" or "manual"
-	Image           string    `json:"image"`
-	CheckedAt       time.Time `json:"checked_at"`
+	CurrentVersion   string    `json:"current_version"`
+	CurrentCommit    string    `json:"current_commit"`
+	LatestVersion    string    `json:"latest_version"`
+	LatestCommit     string    `json:"latest_commit,omitempty"`
+	UpdateAvailable  bool      `json:"update_available"`
+	Building         bool      `json:"building,omitempty"`
+	Source           string    `json:"source,omitempty"` // "ghcr" or "github"
+	ReleaseName      string    `json:"release_name,omitempty"`
+	ReleaseNotes     string    `json:"release_notes,omitempty"`
+	ReleaseURL       string    `json:"release_url,omitempty"`
+	CanAutoUpdate    bool      `json:"can_auto_update"`
+	AutoUpdateReason string    `json:"auto_update_reason,omitempty"`
+	UpdateMethod     string    `json:"update_method"` // "docker" or "manual"
+	Image            string    `json:"image"`
+	CheckedAt        time.Time `json:"checked_at"`
 }
 
-// Config configures the GitHub release checker and Docker self-updater.
+// Config configures the GHCR / GitHub release checker and Docker self-updater.
 type Config struct {
-	Repo          string
-	Image         string
-	DockerSocket  string
-	APIBaseURL    string
-	HTTPClient    *http.Client
-	CurrentVer    string
-	CurrentCommit string
+	Repo             string
+	Image            string
+	DockerSocket     string
+	APIBaseURL       string
+	RegistryBaseURL  string
+	HTTPClient       *http.Client
+	CurrentVer       string
+	CurrentCommit    string
+	CurrentBuildDate string
 }
 
-// Updater checks GitHub for newer MeshWatch releases/commits and can orchestrate
-// a zero-downtime-style Docker container self-update with automatic rollback.
+// Updater checks GHCR OCI labels (primary, zero GitHub REST rate limit) and GitHub releases/CI
+// for newer MeshWatch images, and can orchestrate a Docker container self-update with rollback.
 type Updater struct {
-	repo          string
-	image         string
-	dockerSocket  string
-	apiBaseURL    string
-	httpClient    *http.Client
-	currentVer    string
-	currentCommit string
+	repo             string
+	image            string
+	dockerSocket     string
+	apiBaseURL       string
+	registryBaseURL  string
+	httpClient       *http.Client
+	currentVer       string
+	currentCommit    string
+	currentBuildDate string
 
 	mu          sync.Mutex
 	cached      *CheckResult
@@ -86,6 +94,13 @@ func New(cfg Config) *Updater {
 		sock = "/var/run/docker.sock"
 	}
 	apiBase := strings.TrimRight(strings.TrimSpace(cfg.APIBaseURL), "/")
+	regBase := strings.TrimRight(strings.TrimSpace(cfg.RegistryBaseURL), "/")
+	if regBase == "" && apiBase == "" {
+		regBase = "https://ghcr.io"
+	}
+	if strings.EqualFold(regBase, "none") {
+		regBase = ""
+	}
 	if apiBase == "" {
 		apiBase = "https://api.github.com"
 	}
@@ -104,19 +119,26 @@ func New(cfg Config) *Updater {
 	if curCommit == "" {
 		curCommit = version.ShortCommit()
 	}
+	curBuildDate := strings.TrimSpace(cfg.CurrentBuildDate)
+	if curBuildDate == "" {
+		curBuildDate = strings.TrimSpace(version.BuildDate)
+	}
 
 	return &Updater{
-		repo:          repo,
-		image:         image,
-		dockerSocket:  sock,
-		apiBaseURL:    apiBase,
-		httpClient:    client,
-		currentVer:    curVer,
-		currentCommit: curCommit,
+		repo:             repo,
+		image:            image,
+		dockerSocket:     sock,
+		apiBaseURL:       apiBase,
+		registryBaseURL:  regBase,
+		httpClient:       client,
+		currentVer:       curVer,
+		currentCommit:    curCommit,
+		currentBuildDate: curBuildDate,
 	}
 }
 
-// Check queries GitHub releases (or latest main commit when no release exists) to detect updates.
+// Check queries GHCR OCI metadata first (avoiding GitHub REST API rate limits and confirming
+// the image is already published), falling back to GitHub releases/CI/commits if needed.
 func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 	u.mu.Lock()
 	if !force && u.cached != nil && time.Now().Before(u.cachedUntil) {
@@ -126,26 +148,41 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 	}
 	u.mu.Unlock()
 
-	canAuto := u.canSelfUpdateDocker(ctx)
+	_, autoErr := u.detectSelfContainerID(ctx)
+	canAuto := autoErr == nil
 	method := "manual"
+	autoReason := ""
 	if canAuto {
 		method = "docker"
+	} else if autoErr != nil {
+		autoReason = autoErr.Error()
 	}
 
 	res := CheckResult{
-		CurrentVersion: u.currentVer,
-		CurrentCommit:  u.currentCommit,
-		CanAutoUpdate:  canAuto,
-		UpdateMethod:   method,
-		Image:          u.image,
-		CheckedAt:      time.Now().UTC(),
+		CurrentVersion:   u.currentVer,
+		CurrentCommit:    u.currentCommit,
+		CanAutoUpdate:    canAuto,
+		AutoUpdateReason: autoReason,
+		UpdateMethod:     method,
+		Image:            u.image,
+		CheckedAt:        time.Now().UTC(),
 	}
 
+	// Primary path: query GHCR OCI manifest + config labels directly.
+	if u.registryBaseURL != "" {
+		if ghcrRes, ok := u.fetchLatestFromGHCR(ctx, res); ok {
+			u.storeCache(ghcrRes, defaultCacheTTL)
+			return ghcrRes, nil
+		}
+	}
+
+	// Secondary path: GitHub Releases -> GitHub Actions ready builds -> main commit.
 	rel, foundRelease, err := u.fetchLatestRelease(ctx)
 	if err != nil {
 		return res, err
 	}
 	if foundRelease {
+		res.Source = "github"
 		res.LatestVersion = rel.TagName
 		res.ReleaseName = rel.Name
 		res.ReleaseNotes = trimNotes(rel.Body)
@@ -156,15 +193,11 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 			res.Image = repoBase + ":" + rel.TagName
 		}
 	} else {
-		// No tagged release yet: prefer the latest commit on main whose CI Docker image
-		// actually succeeded and was pushed to GHCR, preventing stale pulls during builds.
 		readyRun, alreadyAhead, building, hasRuns := u.fetchLatestReadyMainBuild(ctx)
 		res.Building = building
+		res.Source = "github"
 		if hasRuns {
-			short := readyRun.HeadSHA
-			if len(short) > 7 {
-				short = short[:7]
-			}
+			short := shortCommit(readyRun.HeadSHA)
 			res.LatestCommit = short
 			res.LatestVersion = "main@" + short
 			res.ReleaseName = firstLine(readyRun.HeadCommit.Message)
@@ -175,7 +208,7 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 				res.LatestVersion = "main@" + u.currentCommit
 				res.UpdateAvailable = false
 			} else {
-				res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(readyRun.HeadSHA, u.currentCommit)
+				res.UpdateAvailable = isDifferentReleaseCommit(u.currentCommit, readyRun.HeadSHA)
 			}
 			repoBase, _ := splitImageRef(u.image)
 			res.Image = repoBase + ":main-" + short
@@ -184,26 +217,259 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 			if err != nil {
 				return res, err
 			}
-			short := commit.SHA
-			if len(short) > 7 {
-				short = short[:7]
-			}
+			short := shortCommit(commit.SHA)
 			res.LatestCommit = short
 			res.LatestVersion = "main@" + short
 			res.ReleaseName = firstLine(commit.Commit.Message)
 			res.ReleaseNotes = trimNotes(commit.Commit.Message)
 			res.ReleaseURL = commit.HTMLURL
-			res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(commit.SHA, u.currentCommit)
+			res.UpdateAvailable = isDifferentReleaseCommit(u.currentCommit, commit.SHA)
 		}
 	}
 
+	u.storeCache(res, defaultCacheTTL)
+	return res, nil
+}
+
+func (u *Updater) storeCache(res CheckResult, ttl time.Duration) {
 	u.mu.Lock()
 	cp := res
 	u.cached = &cp
-	u.cachedUntil = time.Now().Add(defaultCacheTTL)
+	u.cachedUntil = time.Now().Add(ttl)
 	u.mu.Unlock()
+}
 
-	return res, nil
+type ociPlatform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+}
+
+type ociDescriptor struct {
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Platform    *ociPlatform      `json:"platform,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type ociManifestOrIndex struct {
+	MediaType string          `json:"mediaType"`
+	Manifests []ociDescriptor `json:"manifests"`
+	Config    *ociDescriptor  `json:"config"`
+}
+
+type ociImageConfigBlob struct {
+	Config struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"config"`
+}
+
+func (u *Updater) fetchLatestFromGHCR(ctx context.Context, base CheckResult) (CheckResult, bool) {
+	repoBase, tag := splitImageRef(u.image)
+	imagePath := stripRegistryHost(repoBase)
+	if imagePath == "" {
+		return base, false
+	}
+
+	token, err := u.fetchRegistryToken(ctx, imagePath)
+	if err != nil {
+		return base, false
+	}
+
+	manifest, err := u.fetchRegistryManifest(ctx, imagePath, tag, token)
+	if err != nil {
+		return base, false
+	}
+
+	// Resolve multi-arch OCI Index / Manifest List to the current platform manifest.
+	if len(manifest.Manifests) > 0 {
+		selected := selectPlatformManifest(manifest.Manifests, runtime.GOARCH)
+		if selected == "" {
+			return base, false
+		}
+		manifest, err = u.fetchRegistryManifest(ctx, imagePath, selected, token)
+		if err != nil {
+			return base, false
+		}
+	}
+
+	if manifest.Config == nil || manifest.Config.Digest == "" {
+		return base, false
+	}
+
+	labels, err := u.fetchRegistryConfigLabels(ctx, imagePath, manifest.Config.Digest, token)
+	if err != nil {
+		return base, false
+	}
+
+	rev := strings.TrimSpace(labels["org.opencontainers.image.revision"])
+	ver := strings.TrimSpace(labels["org.opencontainers.image.version"])
+	title := strings.TrimSpace(labels["org.opencontainers.image.title"])
+	created := strings.TrimSpace(labels["org.opencontainers.image.created"])
+	if rev == "" {
+		// Older image without OCI revision label: fall back to GitHub API.
+		return base, false
+	}
+
+	shortRev := shortCommit(rev)
+	out := base
+	out.Source = "ghcr"
+	out.LatestCommit = shortRev
+	if ver != "" {
+		out.LatestVersion = ver
+	} else {
+		out.LatestVersion = "main@" + shortRev
+	}
+	if line := firstLine(title); line != "" {
+		out.ReleaseName = line
+		out.ReleaseNotes = trimNotes(title)
+	} else {
+		out.ReleaseName = "Version " + out.LatestVersion
+	}
+	out.ReleaseURL = fmt.Sprintf("https://github.com/%s/commit/%s", u.repo, rev)
+
+	targetTag := tag
+	if ver != "" && !strings.ContainsAny(ver, " \t\r\n@") {
+		targetTag = ver
+	}
+	out.Image = repoBase + ":" + targetTag
+
+	out.UpdateAvailable = u.shouldOfferGHCRUpdate(ver, rev, created)
+	return out, true
+}
+
+func (u *Updater) shouldOfferGHCRUpdate(remoteVer, remoteRev, remoteCreated string) bool {
+	if isSameCommit(u.currentCommit, remoteRev) {
+		return false
+	}
+	if isNewerTimeCheck(u.currentBuildDate, remoteCreated) {
+		return false
+	}
+	if _, lOK := parseSemver(remoteVer); lOK {
+		if _, cOK := parseSemver(u.currentVer); cOK {
+			return isNewerVersion(u.currentVer, remoteVer)
+		}
+	}
+	return isDifferentReleaseCommit(u.currentCommit, remoteRev)
+}
+
+// isNewerTimeCheck returns true if the local build is at least as new as the remote build.
+func isNewerTimeCheck(localDateStr, remoteDateStr string) bool {
+	if strings.TrimSpace(localDateStr) == "" || strings.TrimSpace(remoteDateStr) == "" {
+		return false
+	}
+	localT, err1 := time.Parse(time.RFC3339, strings.TrimSpace(localDateStr))
+	remoteT, err2 := time.Parse(time.RFC3339, strings.TrimSpace(remoteDateStr))
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return !remoteT.After(localT.Add(5 * time.Second))
+}
+
+func selectPlatformManifest(list []ociDescriptor, arch string) string {
+	for _, m := range list {
+		if m.Platform == nil {
+			continue
+		}
+		if m.Annotations != nil && m.Annotations["vnd.docker.reference.type"] == "attestation-manifest" {
+			continue
+		}
+		if strings.EqualFold(m.Platform.OS, "linux") && strings.EqualFold(m.Platform.Architecture, arch) {
+			return m.Digest
+		}
+	}
+	for _, m := range list {
+		if m.Platform == nil {
+			continue
+		}
+		if m.Platform.Architecture != "" && !strings.EqualFold(m.Platform.Architecture, "unknown") {
+			return m.Digest
+		}
+	}
+	return ""
+}
+
+func (u *Updater) fetchRegistryToken(ctx context.Context, imagePath string) (string, error) {
+	endpoint := fmt.Sprintf("%s/token?service=ghcr.io&scope=repository:%s:pull",
+		u.registryBaseURL, url.QueryEscape(imagePath))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "MeshWatch-Updater/1.0")
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("registry token HTTP %d", resp.StatusCode)
+	}
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 128*1024)).Decode(&payload); err != nil {
+		return "", err
+	}
+	return payload.Token, nil
+}
+
+func (u *Updater) fetchRegistryManifest(ctx context.Context, imagePath, ref, token string) (ociManifestOrIndex, error) {
+	endpoint := fmt.Sprintf("%s/v2/%s/manifests/%s", u.registryBaseURL, imagePath, ref)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ociManifestOrIndex{}, err
+	}
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+	req.Header.Set("User-Agent", "MeshWatch-Updater/1.0")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return ociManifestOrIndex{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ociManifestOrIndex{}, fmt.Errorf("registry manifest HTTP %d", resp.StatusCode)
+	}
+	var out ociManifestOrIndex
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&out); err != nil {
+		return ociManifestOrIndex{}, err
+	}
+	return out, nil
+}
+
+func (u *Updater) fetchRegistryConfigLabels(ctx context.Context, imagePath, digest, token string) (map[string]string, error) {
+	endpoint := fmt.Sprintf("%s/v2/%s/blobs/%s", u.registryBaseURL, imagePath, digest)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "MeshWatch-Updater/1.0")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("registry config blob HTTP %d", resp.StatusCode)
+	}
+	var blob ociImageConfigBlob
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&blob); err != nil {
+		return nil, err
+	}
+	return blob.Config.Labels, nil
 }
 
 type ghRelease struct {
@@ -230,6 +496,9 @@ func (u *Updater) fetchLatestRelease(ctx context.Context) (ghRelease, bool, erro
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ghRelease{}, false, nil
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		return ghRelease{}, false, errors.New("limite temporaire de l'API GitHub atteinte : réessayez dans quelques minutes")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return ghRelease{}, false, fmt.Errorf("GitHub API HTTP %d", resp.StatusCode)
@@ -279,19 +548,16 @@ func (u *Updater) fetchLatestReadyMainBuild(ctx context.Context) (ready ghWorkfl
 		return ghWorkflowRun{}, false, false, false
 	}
 
-	// Check if the newest push run is still compiling/publishing (and isn't already running locally).
 	newest := payload.WorkflowRuns[0]
 	if (newest.Status == "queued" || newest.Status == "in_progress") &&
-		(u.currentCommit == "" || !strings.HasPrefix(newest.HeadSHA, u.currentCommit)) {
+		!isSameCommit(u.currentCommit, newest.HeadSHA) {
 		building = true
 	}
 
-	// Runs are newest-first: if currentCommit appears before the first successful CI run,
-	// we are already on (or ahead of) the latest published image — never offer a downgrade.
 	curIdx := -1
 	readyIdx := -1
 	for i, run := range payload.WorkflowRuns {
-		if curIdx == -1 && u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && strings.HasPrefix(run.HeadSHA, u.currentCommit) {
+		if curIdx == -1 && isSameCommit(u.currentCommit, run.HeadSHA) {
 			curIdx = i
 		}
 		if readyIdx == -1 && run.Status == "completed" && run.Conclusion == "success" && run.HeadSHA != "" {
@@ -330,6 +596,9 @@ func (u *Updater) fetchLatestMainCommit(ctx context.Context) (ghCommit, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		return ghCommit{}, errors.New("limite temporaire de l'API GitHub atteinte : réessayez dans quelques minutes")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return ghCommit{}, fmt.Errorf("GitHub API commits HTTP %d", resp.StatusCode)
 	}
@@ -340,7 +609,13 @@ func (u *Updater) fetchLatestMainCommit(ctx context.Context) (ghCommit, error) {
 	return c, nil
 }
 
-// ApplyDockerUpdate pulls the latest Docker image and spawns an ephemeral helper container
+type selfContainerMeta struct {
+	User         string
+	GroupAdd     []string
+	HostSockPath string
+}
+
+// ApplyDockerUpdate pulls the target Docker image and spawns an ephemeral helper container
 // running `meshwatch self-update` to replace the current container cleanly with rollback safety.
 func (u *Updater) ApplyDockerUpdate(ctx context.Context, imageOverride string) error {
 	targetImage := strings.TrimSpace(imageOverride)
@@ -355,25 +630,54 @@ func (u *Updater) ApplyDockerUpdate(ctx context.Context, imageOverride string) e
 
 	client, baseURL := newDockerHTTPClient(u.dockerSocket, 3*time.Minute)
 
-	// 1. Pull latest image before touching the running container.
+	// 1. Inspect self container to mirror User, GroupAdd and host socket bind path into helper.
+	meta := u.inspectSelfContainerMeta(ctx, client, baseURL, selfID)
+
+	// 2. Pull target image before touching the running container.
 	if err := dockerPullImage(ctx, client, baseURL, targetImage); err != nil {
 		return fmt.Errorf("téléchargement de l'image %s échoué : %w", targetImage, err)
 	}
 
-	// 2. Spawn a short-lived helper container from the NEW image to swap the running container.
+	// Keep local :latest aligned best-effort when pulling a specific version/commit tag.
+	repoBase, targetTag := splitImageRef(targetImage)
+	if repoBase != "" && targetTag != "" && targetTag != "latest" {
+		_ = dockerPost(ctx, client,
+			fmt.Sprintf("%s/images/%s/tag?repo=%s&tag=latest", baseURL, url.PathEscape(targetImage), url.QueryEscape(repoBase)),
+			nil, []int{201})
+	}
+
+	// 3. Spawn a short-lived helper container from the NEW image to swap the running container.
+	sockMount := "/var/run/docker.sock"
+	if meta.HostSockPath != "" {
+		sockMount = meta.HostSockPath
+	} else if !isNetworkDockerSocket(u.dockerSocket) {
+		sockMount = strings.TrimPrefix(u.dockerSocket, "unix://")
+	}
+
+	helperSocketArg := u.dockerSocket
+	hostConfig := map[string]any{
+		"AutoRemove": true,
+	}
+	if !isNetworkDockerSocket(u.dockerSocket) {
+		helperSocketArg = "/var/run/docker.sock"
+		hostConfig["Binds"] = []string{sockMount + ":/var/run/docker.sock"}
+	}
+	if len(meta.GroupAdd) > 0 {
+		hostConfig["GroupAdd"] = meta.GroupAdd
+	}
+
 	helperBody := map[string]any{
 		"Image": targetImage,
 		"Cmd": []string{
 			"self-update",
 			"--container", selfID,
 			"--image", targetImage,
-			"--socket", u.dockerSocket,
+			"--socket", helperSocketArg,
 		},
-		"HostConfig": map[string]any{
-			"AutoRemove": true,
-			"Binds":      []string{strings.TrimPrefix(u.dockerSocket, "unix://") + ":/var/run/docker.sock"},
-			"GroupAdd":   u.detectSelfGroupAdd(ctx, client, baseURL, selfID),
-		},
+		"HostConfig": hostConfig,
+	}
+	if strings.TrimSpace(meta.User) != "" {
+		helperBody["User"] = meta.User
 	}
 
 	rawBody, _ := json.Marshal(helperBody)
@@ -419,7 +723,7 @@ func (u *Updater) ApplyDockerUpdate(ctx context.Context, imageOverride string) e
 
 // RunSelfUpdateHelper is executed inside the short-lived helper container (`meshwatch self-update`).
 // It stops the target container, renames it as backup, recreates it with the new image preserving
-// all mounts/ports/env/networks, starts it, and automatically rolls back on any failure.
+// all mounts/ports/env/networks cleanly, starts it, verifies health, and rolls back on failure.
 func RunSelfUpdateHelper(ctx context.Context, dockerSocket, targetContainer, newImage string) error {
 	if strings.TrimSpace(targetContainer) == "" || strings.TrimSpace(newImage) == "" {
 		return errors.New("self-update requires --container and --image")
@@ -446,6 +750,7 @@ func RunSelfUpdateHelper(ctx context.Context, dockerSocket, targetContainer, new
 		return fmt.Errorf("decode container inspect: %w", err)
 	}
 
+	fullID, _ := inspect["Id"].(string)
 	rawName, _ := inspect["Name"].(string)
 	origName := strings.TrimPrefix(rawName, "/")
 	if origName == "" {
@@ -457,39 +762,36 @@ func RunSelfUpdateHelper(ctx context.Context, dockerSocket, targetContainer, new
 	hostCfgObj, _ := inspect["HostConfig"].(map[string]any)
 	netSettings, _ := inspect["NetworkSettings"].(map[string]any)
 
+	origHostname := ""
 	if cfgObj == nil {
 		cfgObj = map[string]any{}
+	} else {
+		origHostname, _ = cfgObj["Hostname"].(string)
 	}
-	// Replace image and clear container-specific hostname so Docker assigns fresh hostname.
 	cfgObj["Image"] = newImage
 	delete(cfgObj, "Hostname")
+	delete(cfgObj, "Domainname")
 
 	createPayload := map[string]any{}
 	for k, v := range cfgObj {
 		createPayload[k] = v
 	}
+	networkMode := ""
 	if hostCfgObj != nil {
 		createPayload["HostConfig"] = hostCfgObj
+		networkMode, _ = hostCfgObj["NetworkMode"].(string)
 	}
-	if netSettings != nil {
-		if nets, ok := netSettings["Networks"].(map[string]any); ok && len(nets) > 0 {
-			endpoints := make(map[string]any, len(nets))
-			for netName, netVal := range nets {
-				if nv, ok := netVal.(map[string]any); ok {
-					ep := map[string]any{}
-					if aliases, ok := nv["Aliases"]; ok && aliases != nil {
-						ep["Aliases"] = aliases
-					}
-					endpoints[netName] = ep
-				}
-			}
-			createPayload["NetworkingConfig"] = map[string]any{
-				"EndpointsConfig": endpoints,
-			}
+
+	primaryNet, primaryEndpoint, extraNets := buildCleanNetworkEndpoints(netSettings, networkMode, targetContainer, fullID, origHostname)
+	if primaryNet != "" {
+		createPayload["NetworkingConfig"] = map[string]any{
+			"EndpointsConfig": map[string]any{
+				primaryNet: primaryEndpoint,
+			},
 		}
 	}
 
-	// Brief pause so the UI receives the HTTP 202 response before the old container stops.
+	// Brief pause so the UI receives HTTP 202 before the old container stops.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -511,6 +813,15 @@ func RunSelfUpdateHelper(ctx context.Context, dockerSocket, targetContainer, new
 		_ = dockerPost(ctx, client, baseURL+"/containers/"+url.PathEscape(targetContainer)+"/rename?name="+url.QueryEscape(origName), nil, []int{204})
 		_ = dockerPost(ctx, client, baseURL+"/containers/"+url.PathEscape(targetContainer)+"/start", nil, []int{204, 304})
 		return cause
+	}
+
+	deleteFailedContainer := func(id string) {
+		delReq, _ := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/containers/"+url.PathEscape(id)+"?force=true", nil)
+		if delReq != nil {
+			if r, e := client.Do(delReq); e == nil {
+				_ = r.Body.Close()
+			}
+		}
 	}
 
 	// 4. Create new container with original name and updated image.
@@ -539,18 +850,31 @@ func RunSelfUpdateHelper(ctx context.Context, dockerSocket, targetContainer, new
 		return rollback(errors.New("invalid create response"))
 	}
 
-	// 5. Start the new container.
-	if err := dockerPost(ctx, client, baseURL+"/containers/"+url.PathEscape(created.ID)+"/start", nil, []int{204, 304}); err != nil {
-		delReq, _ := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/containers/"+url.PathEscape(created.ID)+"?force=true", nil)
-		if delReq != nil {
-			if r, e := client.Do(delReq); e == nil {
-				_ = r.Body.Close()
-			}
+	// 5. Connect any extra networks (Docker create accepts a single endpoint cleanly).
+	for _, netConn := range extraNets {
+		connectPayload, _ := json.Marshal(map[string]any{
+			"Container":      created.ID,
+			"EndpointConfig": netConn.endpoint,
+		})
+		if err := dockerPostJSON(ctx, client, baseURL+"/networks/"+url.PathEscape(netConn.name)+"/connect", connectPayload, []int{200, 204}); err != nil {
+			deleteFailedContainer(created.ID)
+			return rollback(fmt.Errorf("connect network %s: %w", netConn.name, err))
 		}
+	}
+
+	// 6. Start the new container.
+	if err := dockerPost(ctx, client, baseURL+"/containers/"+url.PathEscape(created.ID)+"/start", nil, []int{204, 304}); err != nil {
+		deleteFailedContainer(created.ID)
 		return rollback(fmt.Errorf("start updated container: %w", err))
 	}
 
-	// 6. Remove backup container now that the updated container is running.
+	// 7. Verify the new container stays healthy/running before removing backup.
+	if err := verifyContainerRunning(ctx, client, baseURL, created.ID); err != nil {
+		deleteFailedContainer(created.ID)
+		return rollback(fmt.Errorf("new container failed startup check: %w", err))
+	}
+
+	// 8. Remove backup container now that the updated container is verified running.
 	delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/containers/"+url.PathEscape(targetContainer), nil)
 	if err == nil {
 		if r, e := client.Do(delReq); e == nil {
@@ -561,65 +885,253 @@ func RunSelfUpdateHelper(ctx context.Context, dockerSocket, targetContainer, new
 	return nil
 }
 
-func (u *Updater) canSelfUpdateDocker(ctx context.Context) bool {
-	if _, err := u.detectSelfContainerID(ctx); err != nil {
-		return false
+type networkEndpoint struct {
+	name     string
+	endpoint map[string]any
+}
+
+func buildCleanNetworkEndpoints(netSettings map[string]any, networkMode, targetID, fullID, origHostname string) (string, map[string]any, []networkEndpoint) {
+	mode := strings.ToLower(strings.TrimSpace(networkMode))
+	if mode == "host" || mode == "none" || strings.HasPrefix(mode, "container:") {
+		return "", nil, nil
 	}
-	return true
+	if netSettings == nil {
+		return "", nil, nil
+	}
+	nets, ok := netSettings["Networks"].(map[string]any)
+	if !ok || len(nets) == 0 {
+		return "", nil, nil
+	}
+
+	names := make([]string, 0, len(nets))
+	for name := range nets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var (
+		primaryName string
+		primaryEP   map[string]any
+		extras      []networkEndpoint
+	)
+	for _, netName := range names {
+		nv, ok := nets[netName].(map[string]any)
+		if !ok {
+			continue
+		}
+		ep := map[string]any{}
+		if rawAliases, ok := nv["Aliases"].([]any); ok {
+			cleaned := filterStaleAliases(rawAliases, targetID, fullID, origHostname)
+			if len(cleaned) > 0 {
+				ep["Aliases"] = cleaned
+			}
+		}
+		if primaryName == "" {
+			primaryName = netName
+			primaryEP = ep
+		} else {
+			extras = append(extras, networkEndpoint{name: netName, endpoint: ep})
+		}
+	}
+	return primaryName, primaryEP, extras
+}
+
+func filterStaleAliases(raw []any, targetID, fullID, origHostname string) []string {
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		alias, ok := item.(string)
+		if !ok {
+			continue
+		}
+		a := strings.TrimSpace(alias)
+		if a == "" {
+			continue
+		}
+		if a == origHostname || a == targetID || a == fullID {
+			continue
+		}
+		if len(a) >= 12 && isHexString(a) {
+			if (len(fullID) >= len(a) && strings.HasPrefix(fullID, a)) ||
+				(len(targetID) >= len(a) && strings.HasPrefix(targetID, a)) {
+				continue
+			}
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func verifyContainerRunning(ctx context.Context, client *http.Client, baseURL, containerID string) error {
+	deadline := time.Now().Add(3 * time.Second)
+	for attempt := 0; attempt < 6; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/containers/"+url.PathEscape(containerID)+"/json", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		var state struct {
+			State struct {
+				Running    bool   `json:"Running"`
+				Restarting bool   `json:"Restarting"`
+				Status     string `json:"Status"`
+				ExitCode   int    `json:"ExitCode"`
+				Error      string `json:"Error"`
+			} `json:"State"`
+		}
+		decErr := json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&state)
+		_ = resp.Body.Close()
+		if decErr != nil {
+			return decErr
+		}
+		if !state.State.Running || state.State.Restarting {
+			detail := state.State.Error
+			if detail == "" {
+				detail = fmt.Sprintf("status=%s exit=%d restarting=%v", state.State.Status, state.State.ExitCode, state.State.Restarting)
+			}
+			return errors.New(detail)
+		}
+		if attempt >= 2 || time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return nil
 }
 
 func (u *Updater) detectSelfContainerID(ctx context.Context) (string, error) {
 	if _, err := os.Stat("/.dockerenv"); err != nil {
 		return "", errors.New("mise à jour automatique disponible uniquement dans Docker")
 	}
-	host, err := os.Hostname()
-	if err != nil || strings.TrimSpace(host) == "" {
+
+	var candidates []string
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		candidates = append(candidates, strings.TrimSpace(host))
+	}
+	candidates = append(candidates, detectContainerIDsFromProc()...)
+	if len(candidates) == 0 {
 		return "", errors.New("impossible d'identifier le conteneur courant")
 	}
 
-	dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	client, baseURL := newDockerHTTPClient(u.dockerSocket, 2*time.Second)
-	req, err := http.NewRequestWithContext(dctx, http.MethodGet, baseURL+"/containers/"+url.PathEscape(host)+"/json", nil)
-	if err != nil {
-		return "", err
+	client, baseURL := newDockerHTTPClient(u.dockerSocket, 3*time.Second)
+
+	var lastErr error
+	for _, cand := range candidates {
+		req, err := http.NewRequestWithContext(dctx, http.MethodGet, baseURL+"/containers/"+url.PathEscape(cand)+"/json", nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			errMsg := err.Error()
+			if strings.Contains(strings.ToLower(errMsg), "permission denied") {
+				return "", fmt.Errorf("accès au socket Docker refusé (%s) : vérifiez group_add dans docker-compose.yml", u.dockerSocket)
+			}
+			if errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(errMsg), "no such file") {
+				return "", fmt.Errorf("socket Docker introuvable (%s)", u.dockerSocket)
+			}
+			return "", fmt.Errorf("socket Docker inaccessible (%s) : %w", u.dockerSocket, err)
+		}
+		var info struct {
+			ID string `json:"Id"`
+		}
+		code := resp.StatusCode
+		decErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info)
+		_ = resp.Body.Close()
+
+		if code == http.StatusOK && decErr == nil && info.ID != "" {
+			return info.ID, nil
+		}
+		lastErr = fmt.Errorf("conteneur courant introuvable sur Docker (HTTP %d)", code)
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("socket Docker inaccessible (%s) : %w", u.dockerSocket, err)
+	if lastErr != nil {
+		return "", lastErr
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("conteneur courant introuvable sur Docker (HTTP %d)", resp.StatusCode)
-	}
-	var info struct {
-		ID string `json:"Id"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info); err != nil || info.ID == "" {
-		return "", errors.New("réponse Docker inspect invalide")
-	}
-	return info.ID, nil
+	return "", errors.New("conteneur courant introuvable sur Docker")
 }
 
-func (u *Updater) detectSelfGroupAdd(ctx context.Context, client *http.Client, baseURL, selfID string) []string {
+func detectContainerIDsFromProc() []string {
+	mountinfo, _ := os.ReadFile("/proc/self/mountinfo")
+	cgroup, _ := os.ReadFile("/proc/self/cgroup")
+	return extractContainerIDsFromProc(string(mountinfo), string(cgroup))
+}
+
+func extractContainerIDsFromProc(mountinfo, cgroup string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(id string) {
+		if len(id) == 64 && isHexString(id) && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+
+	// Highest confidence: Docker container bind-mounts (/containers/<64-hex>/hosts|resolv.conf|hostname).
+	for _, line := range strings.Split(mountinfo, "\n") {
+		if idx := strings.Index(line, "/containers/"); idx >= 0 {
+			rest := line[idx+len("/containers/"):]
+			if id, _, ok := strings.Cut(rest, "/"); ok {
+				add(id)
+			}
+		}
+	}
+
+	// Secondary: cgroup path (/docker/<64-hex> or docker-<64-hex>.scope).
+	for _, field := range strings.FieldsFunc(cgroup, func(r rune) bool {
+		return r == '/' || r == ':' || r == '-' || r == '.' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		add(field)
+	}
+	return out
+}
+
+func (u *Updater) inspectSelfContainerMeta(ctx context.Context, client *http.Client, baseURL, selfID string) selfContainerMeta {
+	var meta selfContainerMeta
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/containers/"+url.PathEscape(selfID)+"/json", nil)
 	if err != nil {
-		return nil
+		return meta
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil
+		return meta
 	}
 	defer resp.Body.Close()
+
 	var info struct {
+		Config struct {
+			User string `json:"User"`
+		} `json:"Config"`
 		HostConfig struct {
 			GroupAdd []string `json:"GroupAdd"`
 		} `json:"HostConfig"`
+		Mounts []struct {
+			Source      string `json:"Source"`
+			Destination string `json:"Destination"`
+		} `json:"Mounts"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info); err != nil {
-		return nil
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&info); err != nil {
+		return meta
 	}
-	return info.HostConfig.GroupAdd
+	meta.User = info.Config.User
+	meta.GroupAdd = info.HostConfig.GroupAdd
+
+	sockDest := strings.TrimPrefix(u.dockerSocket, "unix://")
+	for _, m := range info.Mounts {
+		if m.Destination == sockDest && m.Source != "" {
+			meta.HostSockPath = m.Source
+			break
+		}
+	}
+	return meta
 }
 
 func dockerPullImage(ctx context.Context, client *http.Client, baseURL, imageRef string) error {
@@ -638,8 +1150,29 @@ func dockerPullImage(ctx context.Context, client *http.Client, baseURL, imageRef
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
-	// Drain streaming pull status so the image is completely pulled before returning.
-	_, _ = io.Copy(io.Discard, resp.Body)
+
+	// Docker Engine reports registry/auth/pull errors inside JSON-lines even on HTTP 200.
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var event struct {
+			Error       string `json:"error"`
+			ErrorDetail struct {
+				Message string `json:"message"`
+			} `json:"errorDetail"`
+		}
+		if err := dec.Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("lecture du flux Docker pull : %w", err)
+		}
+		if msg := strings.TrimSpace(event.ErrorDetail.Message); msg != "" {
+			return errors.New(msg)
+		}
+		if msg := strings.TrimSpace(event.Error); msg != "" {
+			return errors.New(msg)
+		}
+	}
 	return nil
 }
 
@@ -648,6 +1181,19 @@ func dockerPost(ctx context.Context, client *http.Client, endpoint string, body 
 	if err != nil {
 		return err
 	}
+	return doAllowedPost(client, req, allowed)
+}
+
+func dockerPostJSON(ctx context.Context, client *http.Client, endpoint string, rawJSON []byte, allowed []int) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rawJSON))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return doAllowedPost(client, req, allowed)
+}
+
+func doAllowedPost(client *http.Client, req *http.Request, allowed []int) error {
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -660,6 +1206,11 @@ func dockerPost(ctx context.Context, client *http.Client, endpoint string, body 
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+}
+
+func isNetworkDockerSocket(socket string) bool {
+	s := strings.TrimSpace(socket)
+	return strings.HasPrefix(s, "tcp://") || strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
 func newDockerHTTPClient(socket string, timeout time.Duration) (*http.Client, string) {
@@ -697,6 +1248,50 @@ func splitImageRef(ref string) (repo, tag string) {
 		return ref[:lastColon], ref[lastColon+1:]
 	}
 	return ref, "latest"
+}
+
+func stripRegistryHost(repo string) string {
+	parts := strings.SplitN(strings.TrimSpace(repo), "/", 2)
+	if len(parts) == 2 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") || parts[0] == "localhost") {
+		return parts[1]
+	}
+	return strings.TrimSpace(repo)
+}
+
+func shortCommit(sha string) string {
+	s := strings.TrimSpace(sha)
+	if len(s) > 7 {
+		return s[:7]
+	}
+	return s
+}
+
+func isSameCommit(current, remote string) bool {
+	c := strings.TrimSpace(current)
+	r := strings.TrimSpace(remote)
+	if c == "" || r == "" || c == "dev" || c == "none" {
+		return false
+	}
+	return strings.HasPrefix(r, c) || strings.HasPrefix(c, r)
+}
+
+func isDifferentReleaseCommit(current, remote string) bool {
+	c := strings.TrimSpace(current)
+	r := strings.TrimSpace(remote)
+	if c == "" || c == "dev" || c == "none" || r == "" {
+		return false
+	}
+	return !isSameCommit(c, r)
+}
+
+func isHexString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // isNewerVersion compares semver tags like "v1.0.0" vs "v1.2.1".

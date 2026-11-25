@@ -37,22 +37,29 @@ func (m *mockController) Status() RuntimeStatus {
 		name = m.cfg.Node.Name
 		pub = m.cfg.Node.PublicKeyHex
 	}
+	hbAt := time.Now().Add(-10 * time.Second).UTC()
 	return RuntimeStatus{
-		Mode:            "running",
-		NodeName:        name,
-		PublicKeyHex:    pub,
-		TopicTag:        "abcdef0123456789",
-		StartedAt:       time.Now().Add(-time.Hour),
-		UptimeSec:       3600,
-		HeartbeatSec:    30,
-		PeerTimeoutSec:  90,
-		OverallOK:       true,
-		Muted:           m.muted,
-		AutoMuteTargets: []string{"1.1.1.1:443", "9.9.9.9:443"},
-		Relays:          []transport.RelayStatus{{URL: "wss://nos.lol", Connected: true}},
-		Probes:          []probes.ProbeResult{{ID: "web", Kind: "http", OK: true, Summary: "HTTP 200", Latency: 18}},
-		Peers:           []quorum.PeerStatus{{Name: "pote", NodeName: "pote-box", Online: true, EverSeen: true, OverallOK: true}},
+		Mode:             "running",
+		NodeName:         name,
+		PublicKeyHex:     pub,
+		TopicTag:         "abcdef0123456789",
+		StartedAt:        time.Now().Add(-time.Hour),
+		LastHeartbeatAt:  &hbAt,
+		UptimeSec:        3600,
+		HeartbeatSec:     30,
+		PeerTimeoutSec:   90,
+		OverallOK:        true,
+		Muted:            m.muted,
+		ProtectedByCount: 1,
+		AutoMuteTargets:  []string{"1.1.1.1:443", "9.9.9.9:443"},
+		Relays:           []transport.RelayStatus{{URL: "wss://nos.lol", Connected: true}},
+		Probes:           []probes.ProbeResult{{ID: "web", Kind: "http", OK: true, Summary: "HTTP 200", Latency: 18}},
+		Peers:            []quorum.PeerStatus{{Name: "pote", NodeName: "pote-box", Online: true, EverSeen: true, OverallOK: true}},
 	}
+}
+
+func (m *mockController) RunProbesNow(_ context.Context) ([]probes.ProbeResult, bool, error) {
+	return []probes.ProbeResult{{ID: "web", Kind: "http", OK: true, Summary: "HTTP 200", Latency: 12}}, true, nil
 }
 
 func (m *mockController) CurrentConfig() (*config.Config, string) {
@@ -215,6 +222,16 @@ func TestWebUIServerEndpointsAndAuth(t *testing.T) {
 	var pRes probes.ProbeResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &pRes); err != nil || !pRes.OK {
 		t.Fatalf("probes/test unexpected result: %+v err=%v", pRes, err)
+	}
+
+	// 6c. POST /api/probes/run triggers immediate refresh
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/probes/run", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer super-secret-token")
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probes/run status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	// 7. Embedded static assets serve cleanly with security headers

@@ -1,21 +1,26 @@
 (() => {
+  "use strict";
+
   const PROBE_KINDS = [
-    { value: "http", label: "Site ou application web" },
+    { value: "http", label: "Site ou app web" },
     { value: "synology", label: "NAS Synology" },
-    { value: "docker", label: "Applications Docker" },
-    { value: "tcp", label: "Appareil réseau (port)" },
+    { value: "docker", label: "Conteneurs Docker" },
+    { value: "tcp", label: "Appareil du réseau" },
     { value: "node_exporter", label: "Serveur Linux" },
-    { value: "windows_exporter", label: "Serveur Windows" },
+    { value: "windows_exporter", label: "PC Windows" },
     { value: "snmp_oid", label: "Capteur SNMP" }
   ];
 
   const TCP_PORT_PRESETS = [
-    { port: 22, label: "SSH (port 22)" },
-    { port: 80, label: "Web HTTP (port 80)" },
-    { port: 443, label: "Web HTTPS (port 443)" },
+    { port: 22, label: "SSH / Serveur (port 22)" },
+    { port: 80, label: "Interface web HTTP (port 80)" },
+    { port: 443, label: "Interface web HTTPS (port 443)" },
+    { port: 5000, label: "NAS Synology DSM (port 5000)" },
+    { port: 5001, label: "NAS Synology HTTPS (port 5001)" },
+    { port: 8096, label: "Jellyfin (port 8096)" },
+    { port: 8123, label: "Home Assistant (port 8123)" },
     { port: 445, label: "Partage fichiers SMB (port 445)" },
-    { port: 3389, label: "Bureau à distance (port 3389)" },
-    { port: 5000, label: "Synology DSM (port 5000)" }
+    { port: 3389, label: "Bureau à distance RDP (port 3389)" }
   ];
 
   const state = {
@@ -55,6 +60,10 @@
     document.querySelectorAll("[data-theme-choice]").forEach((btn) => {
       btn.addEventListener("click", () => applyTheme(btn.dataset.themeChoice));
     });
+    window.addEventListener("scroll", () => {
+      const tb = $("topbar");
+      if (tb) tb.classList.toggle("is-scrolled", window.scrollY > 8);
+    }, { passive: true });
   }
 
   function applyTheme(theme) {
@@ -90,7 +99,7 @@
     bar.hidden = false;
     state.toastTimer = setTimeout(() => {
       bar.hidden = true;
-    }, durationMs || (kind === "err" ? 6500 : 4000));
+    }, durationMs || (kind === "err" ? 6500 : 4200));
   }
 
   function escapeHTML(str) {
@@ -138,27 +147,82 @@
 
   function formatDurationSec(sec) {
     const s = Math.max(0, Math.floor(sec || 0));
-    if (s < 60) return s + "s";
+    if (s < 60) return s + " s";
     const m = Math.floor(s / 60);
     if (m < 60) return m + " min";
     const h = Math.floor(m / 60);
-    if (h < 24) return h + "h " + (m % 60) + "m";
+    if (h < 24) return h + " h " + (m % 60) + " min";
     const d = Math.floor(h / 24);
-    return d + "j " + (h % 24) + "h";
+    return d + " j " + (h % 24) + " h";
   }
 
   function formatRelativeTime(iso) {
     if (!iso) return "En attente";
     const diff = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
     if (diff < 5) return "À l'instant";
-    if (diff < 60) return "Il y a " + diff + "s";
+    if (diff < 60) return "Il y a " + diff + " s";
     if (diff < 3600) return "Il y a " + Math.floor(diff / 60) + " min";
-    return "Il y a " + Math.floor(diff / 3600) + "h";
+    return "Il y a " + Math.floor(diff / 3600) + " h";
   }
 
   function probeKindLabel(kind) {
     const match = PROBE_KINDS.find((k) => k.value === kind);
     return match ? match.label : kind;
+  }
+
+  function humanizeError(raw) {
+    const s = String(raw || "");
+    if (/connection refused/i.test(s)) return "L'appareil a refusé la connexion. Vérifiez que le service est démarré et le port correct.";
+    if (/no route to host|network is unreachable/i.test(s)) return "Adresse introuvable sur votre réseau local. Vérifiez l'adresse IP.";
+    if (/i\/o timeout|deadline exceeded|timeout/i.test(s)) return "Aucune réponse reçue (délai dépassé). Vérifiez l'adresse IP, le pare-feu ou l'activation SNMP.";
+    if (/no such host/i.test(s)) return "Nom de domaine ou d'appareil introuvable.";
+    return s;
+  }
+
+  function humanizeProbeSummary(p) {
+    const s = String((p && p.summary) || "").trim();
+    if (!s) return p && p.ok ? "Fonctionne normalement" : "Ne répond pas";
+
+    // Docker summary: e.g. "8/8 up" or "6/8 up; traefik (exited)"
+    const dockM = s.match(/^(\d+)\/(\d+)\s+up(?:;\s*(.+))?$/i);
+    if (dockM) {
+      const up = dockM[1];
+      const total = dockM[2];
+      if (!dockM[3]) {
+        return up === total
+          ? up + " sur " + total + " applications actives"
+          : up + " sur " + total + " actives";
+      }
+      return up + "/" + total + " actives : " + dockM[3]
+        .replace(/\(exited\)/g, "(arrêté)")
+        .replace(/\(unhealthy\)/g, "(en erreur)")
+        .replace(/\(missing\)/g, "(introuvable)");
+    }
+
+    // Synology summary: "System OK, RAID OK, Disks 2/2 OK, Temp 36°C"
+    if (/RAID OK/i.test(s) || /System OK/i.test(s)) {
+      return s
+        .replace(/System OK/g, "Système OK")
+        .replace(/System failed/g, "Système en erreur")
+        .replace(/RAID OK/g, "RAID sain")
+        .replace(/Disks (\d+)\/\d+ OK/gi, "$1 disques sains")
+        .replace(/Disks /g, "Disques ")
+        .replace(/Temp /g, "");
+    }
+
+    // HTTP TLS
+    if (/^HTTP \d+/i.test(s)) {
+      return s
+        .replace(/TLS OK:\s*(\d+)d/i, "Certificat valide $1 j")
+        .replace(/TLS cert expires in /i, "Certificat expire dans ");
+    }
+
+    // TCP open
+    if (/^TCP .* reachable$/i.test(s) || /^open$/i.test(s)) {
+      return "Service joignable sur le réseau";
+    }
+
+    return humanizeError(s);
   }
 
   function normalizeDurationSelect(selectEl, val) {
@@ -226,15 +290,6 @@
     if (/^https?:\/\//i.test(s)) return s;
     const hasPort = /:\d+$/.test(s);
     return "http://" + s + (hasPort ? "" : ":" + defaultPort) + "/metrics";
-  }
-
-  function humanizeError(raw) {
-    const s = String(raw || "");
-    if (/connection refused/i.test(s)) return "L'appareil a refusé la connexion. Vérifiez que le service est démarré et le port correct.";
-    if (/no route to host|network is unreachable/i.test(s)) return "Adresse introuvable sur votre réseau local. Vérifiez l'adresse IP.";
-    if (/i\/o timeout|deadline exceeded|timeout/i.test(s)) return "Aucune réponse reçue (délai dépassé). Vérifiez l'adresse IP, le pare-feu ou l'activation SNMP.";
-    if (/no such host/i.test(s)) return "Nom de domaine ou d'appareil introuvable.";
-    return s;
   }
 
   /* ---------------- API ---------------- */
@@ -331,49 +386,79 @@
 
     const peers = st.peers || [];
     const onlinePeers = peers.filter((p) => p.online).length;
+    const peerAlerts = peers.filter((p) => p.timed_out || (p.online && !p.overall_ok)).length;
 
     const relays = st.relays || [];
     const connRelays = relays.filter((r) => r.connected).length;
 
+    const hasNotif = Boolean(
+      st.notifications && (st.notifications.ntfy_enabled || st.notifications.photon_enabled)
+    );
+
+    const heroDot = $("ov-hero-dot");
+    heroDot.className = "hero-dot";
+
+    const lastHbStr = st.last_heartbeat_at
+      ? "Dernier signal envoyé " + formatRelativeTime(st.last_heartbeat_at).toLowerCase()
+      : "En attente du premier signal";
+
     if (st.mode === "setup") {
-      $("ov-headline").textContent = "Prêt à démarrer";
-      $("ov-subtitle").textContent = "Cliquez sur Démarrer en un clic ci-dessus pour activer votre supervision privée.";
+      heroDot.classList.add("is-warn");
+      $("ov-headline").textContent = "Prêt à démarrer votre supervision";
+      $("ov-subtitle").textContent = "Cliquez sur Démarrer en un clic ci-dessus pour créer votre groupe privé.";
     } else if (st.muted) {
-      $("ov-headline").textContent = "Accès Internet interrompu";
-      $("ov-subtitle").textContent = "Les alertes sont mises en pause automatiquement pour éviter les fausses alertes.";
+      heroDot.classList.add("is-warn");
+      $("ov-headline").textContent = "Connexion Internet coupée (alertes en pause)";
+      $("ov-subtitle").textContent = "Pour éviter de fausses alertes, MeshWatch suspend l'envoi tant que votre box ne répond plus.";
     } else if (failedProbes > 0) {
+      heroDot.classList.add("is-err");
       $("ov-headline").textContent =
-        failedProbes === 1 ? "1 service demande votre attention" : failedProbes + " services demandent votre attention";
-      $("ov-subtitle").textContent = (st.node_name || "Votre serveur") + " surveille " + probes.length + " service(s) en local.";
+        failedProbes === 1 ? "1 appareil demande votre attention" : failedProbes + " appareils demandent votre attention";
+      $("ov-subtitle").textContent = (st.node_name || "Chez vous") + " · " + lastHbStr;
+    } else if (peerAlerts > 0) {
+      heroDot.classList.add("is-warn");
+      $("ov-headline").textContent = "Un ami signale une panne";
+      $("ov-subtitle").textContent = "Vos appareils fonctionnent bien · " + lastHbStr;
     } else if (probes.length === 0) {
       $("ov-headline").textContent = (st.node_name || "Votre espace") + " est prêt";
-      $("ov-subtitle").textContent = "Ajoutez vos premiers appareils ou conteneurs Docker dans l'onglet Appareils.";
+      $("ov-subtitle").textContent = "Ajoutez vos premiers appareils dans Mes appareils pour commencer la veille.";
+    } else if (onlinePeers > 0) {
+      $("ov-headline").textContent = "Tout fonctionne chez vous et chez vos amis";
+      $("ov-subtitle").textContent = "Protégé par " + onlinePeers + (onlinePeers > 1 ? " amis en ligne" : " ami en ligne") + " · " + lastHbStr;
     } else {
       $("ov-headline").textContent = "Tout fonctionne sur " + (st.node_name || "votre homelab");
-      $("ov-subtitle").textContent = "Vos " + probes.length + " services répondent normalement. Aucun port ouvert sur Internet.";
+      $("ov-subtitle").textContent = lastHbStr + " · Invitez un ami pour activer l'entraide en cas de coupure.";
     }
 
     $("metric-probes").textContent = okProbes + " / " + probes.length;
     $("metric-probes-sub").textContent =
       probes.length === 0
-        ? "Cliquez sur Ajouter un appareil"
+        ? "Aucun appareil configuré"
         : failedProbes === 0
-          ? "Tous les services fonctionnent"
-          : failedProbes + " alerte(s) en cours";
+          ? "Tous vos appareils répondent"
+          : failedProbes + " panne(s) détectée(s)";
 
     $("metric-peers").textContent = onlinePeers + " / " + peers.length;
     $("metric-peers-sub").textContent =
       peers.length === 0
-        ? "Ajoutez un ami pour vous entraider"
+        ? "Aucun ami configuré"
         : onlinePeers === peers.length
-          ? "Tous vos amis sont en ligne"
+          ? "Vous veillez les uns sur les autres"
           : (peers.length - onlinePeers) + " ami(s) hors ligne";
 
-    $("metric-relays").textContent = connRelays + " / " + relays.length;
-    $("metric-relays-sub").textContent = connRelays > 0 ? "Échanges chiffrés actifs" : "Reconnexion en cours";
+    $("metric-alerts").textContent = hasNotif ? "Actives" : "À activer";
+    $("metric-alerts-sub").textContent = hasNotif ? "Notifications prêtes" : "Aucune configurée";
+    $("metric-alerts-action").textContent = hasNotif ? "Tester" : "Configurer";
 
     $("metric-wan").textContent = st.muted ? "Coupé" : "Connecté";
+    $("metric-wan-sub").textContent = st.muted
+      ? "Alertes en pause"
+      : connRelays + "/" + relays.length + " relais actifs";
     $("ov-uptime").textContent = "Actif depuis " + formatDurationSec(st.uptime_sec);
+    $("ov-mutual-explain").textContent = onlinePeers > 0
+      ? "Vos appareils sont testés localement sans ouvrir aucun port. Si votre maison ne répond plus, " +
+        onlinePeers + (onlinePeers > 1 ? " amis en ligne vous alertent" : " ami en ligne vous alerte") + " sur votre téléphone."
+      : "Vos appareils sont testés localement sans ouvrir de port. Ajoutez au moins un ami pour recevoir une alerte si votre box coupe.";
 
     if (st.pubkey_hex) $("id-pubkey").value = st.pubkey_hex;
     if (st.topic_tag) $("id-topic-tag").value = st.topic_tag;
@@ -417,7 +502,7 @@
     }
 
     card.hidden = false;
-    $("onboarding-progress").textContent = doneCount + " sur 3 étapes terminées. Tout se configure directement ici.";
+    $("onboarding-progress").textContent = doneCount + " sur 3 étapes terminées.";
 
     const applyStep = (id, done, num) => {
       const btn = $(id);
@@ -453,7 +538,7 @@
     });
     const pctText = list.length ? Math.round((okCount / list.length) * 100) + "%" : "100%";
     return (
-      '<div class="uptime-strip">' +
+      '<div class="uptime-strip" title="Disponibilité sur les dernières vérifications">' +
       '<div class="uptime-bars">' + barsHTML + "</div>" +
       '<span class="uptime-pct tabular">' + pctText + "</span>" +
       "</div>"
@@ -461,32 +546,45 @@
   }
 
   function renderHomeProbes(probes, historyMap) {
-    const tbody = $("ov-probes-body");
+    const list = $("ov-probes-list");
     if (!probes.length) {
-      tbody.innerHTML =
-        '<tr><td colspan="6" class="empty-row">Aucun service surveillé. Ouvrez Appareils pour cocher vos conteneurs Docker ou scanner votre réseau en un clic.</td></tr>';
+      list.innerHTML =
+        '<div class="empty-state">Aucun service surveillé pour le moment. Cliquez sur Ajouter un appareil pour choisir vos applications Docker ou scanner votre réseau.</div>';
       return;
     }
-    tbody.innerHTML = probes
+    list.innerHTML = probes
       .map((p) => {
         const cls = p.ok ? "is-ok" : "is-err";
-        const label = p.ok ? "Fonctionne" : "En panne";
-        const lat = p.latency_ms != null ? p.latency_ms + " ms" : "0 ms";
+        const label = p.ok ? "Actif" : "En panne";
+        const lat = (p.latency_ms != null ? p.latency_ms : 0) + " ms";
         const hist = (historyMap && historyMap[p.id]) || [{ ok: p.ok }];
         return (
-          "<tr>" +
-          '<td><span class="cell-primary">' + escapeHTML(p.id) + '</span><span class="cell-secondary">' + escapeHTML(probeKindLabel(p.kind)) + "</span></td>" +
-          '<td><span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span></td>" +
-          "<td>" + renderUptimeStrip(hist, false) + "</td>" +
-          "<td>" + escapeHTML(p.summary || "") + "</td>" +
-          '<td class="num-col tabular">' + escapeHTML(lat) + "</td>" +
-          '<td class="num-col"><button type="button" class="inline-action" data-edit-probe-id="' + escapeHTML(p.id) + '">Modifier</button></td>' +
-          "</tr>"
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
+          '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span>" +
+          '<span class="row-title">' + escapeHTML(p.id) + "</span>" +
+          '<span class="row-kind">' + escapeHTML(probeKindLabel(p.kind)) + "</span>" +
+          "</div>" +
+          '<div class="row-sub">' + escapeHTML(humanizeProbeSummary(p)) + "</div>" +
+          "</div>" +
+          '<div class="row-right">' +
+          renderUptimeStrip(hist, false) +
+          '<span class="row-latency tabular">' + escapeHTML(lat) + "</span>" +
+          '<div class="row-actions">' +
+          '<button type="button" class="inline-action" data-test-probe-id="' + escapeHTML(p.id) + '">Tester</button>' +
+          '<button type="button" class="inline-action" data-edit-probe-id="' + escapeHTML(p.id) + '">Modifier</button>' +
+          "</div>" +
+          "</div>" +
+          "</div>"
         );
       })
       .join("");
 
-    tbody.querySelectorAll("[data-edit-probe-id]").forEach((btn) => {
+    list.querySelectorAll("[data-test-probe-id]").forEach((btn) => {
+      btn.addEventListener("click", () => quickTestProbeByID(btn.dataset.testProbeId, btn));
+    });
+    list.querySelectorAll("[data-edit-probe-id]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = btn.dataset.editProbeId;
         const idx = ((state.config && state.config.probes) || []).findIndex((pr) => pr.id === id);
@@ -496,54 +594,66 @@
   }
 
   function renderHomePeers(peers) {
-    const tbody = $("ov-peers-body");
+    const list = $("ov-peers-list");
     if (!peers.length) {
-      tbody.innerHTML =
-        '<tr><td colspan="4" class="empty-row">Aucun ami connecté pour le moment. Ouvrez Mes amis pour copier votre code d\'invitation.</td></tr>';
+      list.innerHTML =
+        '<div class="empty-state">Aucun ami connecté pour le moment. Ouvrez Mes amis pour copier votre code d\'invitation.</div>';
       return;
     }
-    tbody.innerHTML = peers
+    list.innerHTML = peers
       .map((p) => {
         let cls = "is-muted";
-        let label = "En attente";
+        let label = "En attente de signal";
+        let detail = "Partagez vos codes d'invitation pour relier vos deux installations.";
+        const peerProbes = p.probes || [];
+        const failing = peerProbes.filter((pr) => !pr.ok);
+
         if (p.timed_out) {
           cls = "is-err";
           label = "Hors ligne";
-        } else if (p.online && !p.overall_ok) {
+          detail = "Aucun signal reçu récemment (" + formatRelativeTime(p.last_seen).toLowerCase() + ").";
+        } else if (p.online && failing.length > 0) {
           cls = "is-warn";
-          label = "Un service en alerte";
+          label = failing.length + " service(s) en panne";
+          detail = failing.map((f) => f.id + " (" + humanizeProbeSummary(f) + ")").join(" · ");
         } else if (p.online) {
           cls = "is-ok";
-          label = "En ligne";
+          label = "En ligne · Tout va bien";
+          detail = peerProbes.length
+            ? peerProbes.length + " service(s) actif(s) chez cet ami · Surveillance mutuelle active"
+            : "Connexion mutuelle active (aucun service déclaré chez cet ami)";
         }
 
-        const failing = (p.probes || []).filter((pr) => !pr.ok);
-        const subLine = failing.length
-          ? '<span class="cell-secondary">' + escapeHTML(failing.map((f) => f.id + " : " + f.summary).join(" · ")) + "</span>"
-          : "";
-
         return (
-          "<tr>" +
-          '<td><span class="cell-primary">' + escapeHTML(p.name) + "</span>" + subLine + "</td>" +
-          '<td><span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span></td>" +
-          "<td>" + renderUptimeStrip(p.history || [], true) + "</td>" +
-          '<td class="tabular">' + escapeHTML(formatRelativeTime(p.last_seen)) + "</td>" +
-          "</tr>"
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
+          '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + escapeHTML(label) + "</span>" +
+          '<span class="row-title">' + escapeHTML(p.name) + "</span>" +
+          "</div>" +
+          '<div class="row-sub">' + escapeHTML(detail) + "</div>" +
+          "</div>" +
+          '<div class="row-right">' +
+          renderUptimeStrip(p.history || [], true) +
+          '<span class="band-meta tabular">' + escapeHTML(formatRelativeTime(p.last_seen)) + "</span>" +
+          "</div>" +
+          "</div>"
         );
       })
       .join("");
   }
 
   function renderHomeIncidents(incidents) {
-    const band = $("incidents-band");
     const list = $("ov-incidents-list");
-    if (!band || !list) return;
+    const countEl = $("incidents-count");
+    if (!list) return;
     if (!incidents || !incidents.length) {
-      band.hidden = true;
+      countEl.textContent = "Aucun incident";
+      list.innerHTML =
+        '<div class="empty-state">Aucune panne enregistrée depuis le démarrage de votre agent.</div>';
       return;
     }
-    band.hidden = false;
-    $("incidents-count").textContent = incidents.length + (incidents.length > 1 ? " événements" : " événement");
+    countEl.textContent = incidents.length + (incidents.length > 1 ? " événements" : " événement");
     list.innerHTML = incidents
       .slice(0, 10)
       .map((ev) => {
@@ -551,13 +661,15 @@
         const label = ev.ok ? "Rétabli" : "Incident";
         const when = formatRelativeTime(new Date((ev.ts || 0) * 1000).toISOString());
         return (
-          '<div class="discover-row">' +
-          '<div class="discover-main">' +
-          '<div class="discover-title">' + escapeHTML(ev.target || "") + "</div>" +
-          '<div class="discover-sub">' + escapeHTML(ev.summary || "") + "</div>" +
-          "</div>" +
-          '<div class="discover-right">' +
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
           '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span>" +
+          '<span class="row-title">' + escapeHTML(ev.target || "") + "</span>" +
+          "</div>" +
+          '<div class="row-sub">' + escapeHTML(ev.summary || "") + "</div>" +
+          "</div>" +
+          '<div class="row-right">' +
           '<span class="band-meta tabular">' + escapeHTML(when) + "</span>" +
           "</div>" +
           "</div>"
@@ -574,7 +686,7 @@
     const cBorder = cs.getPropertyValue("--border-strong").trim();
     const cText = cs.getPropertyValue("--text").trim();
     const cMuted = cs.getPropertyValue("--text-muted").trim();
-    const cAccent = cs.getPropertyValue("--accent").trim();
+    const cAccent = cs.getPropertyValue("--accent-ink").trim();
     const cOk = cs.getPropertyValue("--ok").trim();
     const cErr = cs.getPropertyValue("--err").trim();
     const cWarn = cs.getPropertyValue("--warn").trim();
@@ -586,7 +698,7 @@
     const connRelays = relays.filter((r) => r.connected).length;
 
     const peerCount = Math.max(peers.length, 1);
-    const viewH = Math.max(230, 70 + peerCount * 68);
+    const viewH = Math.max(210, 64 + peerCount * 68);
     svg.setAttribute("viewBox", "0 0 960 " + viewH);
 
     const midY = Math.round(viewH / 2);
@@ -594,27 +706,21 @@
     const relayColor = connRelays > 0 ? cAccent : cMuted;
 
     let out = "";
-    out += '<g stroke="' + cBorder + '" stroke-opacity="0.18" stroke-width="1">';
-    for (let x = 120; x < 960; x += 120) {
-      out += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="' + viewH + '"/>';
-    }
-    out += "</g>";
-
     out +=
-      '<path d="M 272 ' + midY + " C 325 " + midY + ", 330 " + midY + ", 375 " + midY +
+      '<path d="M 276 ' + midY + " L 372 " + midY +
       '" fill="none" stroke="' + relayColor + '" stroke-width="2.2" ' +
       (connRelays === 0 ? 'stroke-dasharray="5 5"' : "") + "/>";
 
     const peerStartY = peerCount === 1 ? midY : Math.round((viewH - (peerCount - 1) * 68) / 2);
     if (peers.length === 0) {
       out +=
-        '<path d="M 585 ' + midY + " C 635 " + midY + ", 645 " + midY + ", 690 " + midY +
+        '<path d="M 588 ' + midY + " L 684 " + midY +
         '" fill="none" stroke="' + cBorder + '" stroke-width="1.8" stroke-dasharray="5 5"/>';
       out +=
         '<g class="topo-node" data-topo-tab="friends">' +
-        '<rect x="690" y="' + (midY - 30) + '" width="234" height="60" rx="10" fill="' + cSubtle + '" stroke="' + cBorder + '" stroke-dasharray="4 4" stroke-width="1.3"/>' +
-        '<text x="710" y="' + (midY - 4) + '" fill="' + cText + '" font-size="15" font-weight="600">Inviter un ami</text>' +
-        '<text x="710" y="' + (midY + 16) + '" fill="' + cMuted + '" font-size="13">Partager un code en 1 clic</text>' +
+        '<rect x="684" y="' + (midY - 32) + '" width="244" height="64" rx="12" fill="' + cSubtle + '" stroke="' + cBorder + '" stroke-dasharray="4 4" stroke-width="1.4"/>' +
+        '<text x="704" y="' + (midY - 4) + '" fill="' + cText + '" font-size="15" font-weight="700">Inviter un ami</text>' +
+        '<text x="704" y="' + (midY + 17) + '" fill="' + cMuted + '" font-size="13">Partager un code en 1 clic</text>' +
         "</g>";
     } else {
       peers.forEach((peer, i) => {
@@ -629,43 +735,102 @@
           pState = "Alerte détectée";
         } else if (peer.online) {
           pColor = cOk;
-          pState = "En ligne";
+          pState = "Vous protège";
         }
         out +=
-          '<path d="M 585 ' + midY + " C 638 " + midY + ", 638 " + py + ", 690 " + py +
+          '<path d="M 588 ' + midY + " C 636 " + midY + ", 636 " + py + ", 684 " + py +
           '" fill="none" stroke="' + pColor + '" stroke-width="2" ' +
           (!peer.online ? 'stroke-dasharray="5 5"' : "") + "/>";
         out +=
           '<g class="topo-node" data-topo-tab="friends">' +
-          '<rect x="690" y="' + (py - 26) + '" width="234" height="52" rx="10" fill="' + cSurface + '" stroke="' + cBorder + '" stroke-width="1.4"/>' +
-          '<circle cx="710" cy="' + py + '" r="5" fill="' + pColor + '"/>' +
-          '<text x="725" y="' + (py - 3) + '" fill="' + cText + '" font-size="15" font-weight="600">' + escapeHTML(peer.name.slice(0, 22)) + "</text>" +
-          '<text x="725" y="' + (py + 15) + '" fill="' + cMuted + '" font-size="13">' + escapeHTML(pState) + "</text>" +
+          '<rect x="684" y="' + (py - 28) + '" width="244" height="56" rx="12" fill="' + cSurface + '" stroke="' + cBorder + '" stroke-width="1.4"/>' +
+          '<circle cx="705" cy="' + py + '" r="5" fill="' + pColor + '"/>' +
+          '<text x="720" y="' + (py - 4) + '" fill="' + cText + '" font-size="15" font-weight="700">' + escapeHTML(peer.name.slice(0, 22)) + "</text>" +
+          '<text x="720" y="' + (py + 16) + '" fill="' + cMuted + '" font-size="13">' + escapeHTML(pState) + "</text>" +
           "</g>";
       });
     }
 
     out +=
       '<g class="topo-node" data-topo-tab="settings">' +
-      '<rect x="375" y="' + (midY - 44) + '" width="210" height="88" rx="10" fill="' + cSubtle + '" stroke="' + relayColor + '" stroke-width="1.6"/>' +
-      '<text x="480" y="' + (midY - 12) + '" text-anchor="middle" fill="' + cText + '" font-size="15" font-weight="700">Liaison chiffrée</text>' +
+      '<rect x="372" y="' + (midY - 44) + '" width="216" height="88" rx="12" fill="' + cSubtle + '" stroke="' + relayColor + '" stroke-width="1.6"/>' +
+      '<text x="480" y="' + (midY - 12) + '" text-anchor="middle" fill="' + cText + '" font-size="15" font-weight="700">Liaison privée</text>' +
       '<text x="480" y="' + (midY + 10) + '" text-anchor="middle" fill="' + cMuted + '" font-size="13">' + connRelays + " sur " + relays.length + " relais actifs</text>" +
-      '<text x="480" y="' + (midY + 29) + '" text-anchor="middle" fill="' + cMuted + '" font-size="13">Chiffrement privé E2E</text>' +
+      '<text x="480" y="' + (midY + 29) + '" text-anchor="middle" fill="' + cMuted + '" font-size="13">Chiffrement bout en bout</text>' +
       "</g>";
 
     out +=
       '<g class="topo-node" data-topo-tab="discover">' +
-      '<rect x="36" y="' + (midY - 44) + '" width="236" height="88" rx="10" fill="' + cSurface + '" stroke="' + localColor + '" stroke-width="1.8"/>' +
-      '<circle cx="58" cy="' + (midY - 15) + '" r="5.5" fill="' + localColor + '"/>' +
-      '<text x="73" y="' + (midY - 10) + '" fill="' + cText + '" font-size="15" font-weight="700">' + escapeHTML((st.node_name || "Chez vous").slice(0, 20)) + "</text>" +
-      '<text x="54" y="' + (midY + 12) + '" fill="' + cMuted + '" font-size="13">' + okProbes + " / " + probes.length + " services actifs</text>" +
-      '<text x="54" y="' + (midY + 31) + '" fill="' + cMuted + '" font-size="13">' + (st.muted ? "Internet coupé" : "Aucun port ouvert") + "</text>" +
+      '<rect x="32" y="' + (midY - 44) + '" width="244" height="88" rx="12" fill="' + cSurface + '" stroke="' + localColor + '" stroke-width="1.8"/>' +
+      '<circle cx="54" cy="' + (midY - 15) + '" r="5.5" fill="' + localColor + '"/>' +
+      '<text x="69" y="' + (midY - 10) + '" fill="' + cText + '" font-size="15" font-weight="700">' + escapeHTML((st.node_name || "Chez vous").slice(0, 20)) + "</text>" +
+      '<text x="50" y="' + (midY + 12) + '" fill="' + cMuted + '" font-size="13">' + okProbes + " / " + probes.length + " appareils actifs</text>" +
+      '<text x="50" y="' + (midY + 31) + '" fill="' + cMuted + '" font-size="13">' + (st.muted ? "Internet coupé" : "Aucun port ouvert") + "</text>" +
       "</g>";
 
     svg.innerHTML = out;
     svg.querySelectorAll("[data-topo-tab]").forEach((node) => {
       node.addEventListener("click", () => switchTab(node.dataset.topoTab));
     });
+  }
+
+  /* ---------------- ACTIONS RAPIDES SUR LES APPAREILS ---------------- */
+
+  async function runAllProbesNow() {
+    const btn = $("run-all-probes-btn");
+    btn.disabled = true;
+    btn.textContent = "Vérification...";
+    try {
+      const { ok, data } = await apiFetch("/api/probes/run", {
+        method: "POST",
+        body: "{}"
+      });
+      if (!ok) {
+        showToast("warn", data.error || "Vérification impossible pour le moment.");
+        return;
+      }
+      await fetchStatus();
+      const count = (data.probes || []).length;
+      showToast(
+        data.overall_ok ? "ok" : "warn",
+        data.overall_ok
+          ? count + " appareil(s) vérifiés : tout répond correctement."
+          : "Vérification terminée : un appareil signale un problème."
+      );
+    } catch (err) {
+      showToast("err", "Erreur : " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Tout vérifier";
+    }
+  }
+
+  async function quickTestProbeByID(probeID, btn) {
+    const cfgProbe = ((state.config && state.config.probes) || []).find((pr) => pr.id === probeID);
+    if (!cfgProbe) return;
+    const prevText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Test...";
+    try {
+      const { ok, data } = await apiFetch("/api/probes/test", {
+        method: "POST",
+        body: JSON.stringify({ probe: cfgProbe })
+      });
+      if (!ok) {
+        showToast("err", probeID + " : " + humanizeError(data.error || "échec du test"));
+        return;
+      }
+      if (data.ok) {
+        showToast("ok", probeID + " fonctionne (" + (data.latency_ms || 0) + " ms) · " + humanizeProbeSummary(data));
+      } else {
+        showToast("err", probeID + " en panne · " + humanizeProbeSummary(data));
+      }
+    } catch (err) {
+      showToast("err", "Erreur test : " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
   }
 
   /* ---------------- APPAREILS : DOCKER & LAN ---------------- */
@@ -695,7 +860,7 @@
       if (!ok) {
         meta.textContent = "Docker non détecté sur cette machine (" + (data.error || "socket inaccessible") + ").";
         $("docker-containers-list").innerHTML =
-          '<div class="editor-empty">Si vous utilisez Docker, montez /var/run/docker.sock dans votre Docker Compose pour cocher vos applications ici.</div>';
+          '<div class="empty-state">Si vous utilisez Docker, montez /var/run/docker.sock dans votre docker-compose.yml pour cocher vos applications ici.</div>';
         return;
       }
       state.dockerScannedOnce = true;
@@ -706,11 +871,11 @@
       const runningCount = state.dockerContainers.filter((c) => c.running).length;
       meta.textContent =
         state.dockerContainers.length +
-        " conteneur(s) trouvé(s) (" +
+        " application(s) trouvée(s) (" +
         runningCount +
-        " actif(s), " +
+        " active(s), " +
         state.dockerSelected.size +
-        " surveillé(s)).";
+        " cochée(s)).";
       renderDockerContainers();
     } catch (err) {
       meta.textContent = "Erreur lors de la lecture Docker : " + err.message;
@@ -727,7 +892,7 @@
     );
 
     if (!filtered.length) {
-      list.innerHTML = '<div class="editor-empty">Aucune application ne correspond à votre recherche.</div>';
+      list.innerHTML = '<div class="empty-state">Aucune application ne correspond à votre recherche.</div>';
       return;
     }
 
@@ -745,13 +910,15 @@
         }
         const portsStr = c.ports && c.ports.length ? " · ports " + c.ports.slice(0, 4).join(", ") : "";
         return (
-          '<div class="discover-row">' +
-          '<div class="discover-main">' +
-          '<div class="discover-title">' + escapeHTML(c.name) + "</div>" +
-          '<div class="discover-sub">' + escapeHTML(c.image || "") + escapeHTML(portsStr) + "</div>" +
-          "</div>" +
-          '<div class="discover-right">' +
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
           '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + stateLabel + "</span>" +
+          '<span class="row-title">' + escapeHTML(c.name) + "</span>" +
+          "</div>" +
+          '<div class="row-sub">' + escapeHTML(c.image || "") + escapeHTML(portsStr) + "</div>" +
+          "</div>" +
+          '<div class="row-right">' +
           '<label class="switch-control">' +
           '<input type="checkbox" data-docker-toggle="' + escapeHTML(c.name) + '"' + checked + ">" +
           '<span class="switch-track"></span>' +
@@ -814,7 +981,7 @@
     const subnet = ($("lan-subnet-input").value || "").trim() || "192.168.1.0/24";
     btn.disabled = true;
     btn.textContent = "Scan en cours...";
-    meta.textContent = "Recherche des NAS Synology, serveurs et applications web sur " + subnet + " (quelques secondes)...";
+    meta.textContent = "Recherche des NAS Synology, serveurs et applications web sur " + subnet + "...";
 
     try {
       const { ok, data } = await apiFetch("/api/discover/lan", {
@@ -835,7 +1002,7 @@
         data.scanned_ips +
         " adresses vérifiées en " +
         sec +
-        "s).";
+        " s).";
       meta.textContent = state.lanScanSummary;
       renderLANResults();
     } catch (err) {
@@ -852,7 +1019,7 @@
     if (!state.lanItems.length) {
       if (state.lanScanSummary) {
         list.innerHTML =
-          '<div class="editor-empty">Aucun appareil détecté sur cette plage. Vérifiez le sous-réseau (ex. 192.168.1.0/24 ou 192.168.0.0/24).</div>';
+          '<div class="empty-state">Aucun appareil détecté sur cette plage. Vérifiez le sous-réseau (ex. 192.168.1.0/24 ou 192.168.0.0/24).</div>';
       }
       return;
     }
@@ -883,7 +1050,7 @@
     }
 
     if (!filtered.length) {
-      list.innerHTML = '<div class="editor-empty">Aucun appareil ne correspond à votre recherche.</div>';
+      list.innerHTML = '<div class="empty-state">Aucun appareil ne correspond à votre recherche.</div>';
       return;
     }
 
@@ -893,12 +1060,15 @@
           ? '<span class="status-cell is-ok"><span class="status-dot is-ok"></span>Déjà surveillé</span>'
           : '<button type="button" class="btn-primary" data-add-discovered="' + idx + '">Surveiller</button>';
         return (
-          '<div class="discover-row">' +
-          '<div class="discover-main">' +
-          '<div class="discover-title">' + escapeHTML(item.name) + ' <span class="mono-inline">' + escapeHTML(item.ip) + "</span></div>" +
-          '<div class="discover-sub">' + escapeHTML(item.category_label) + " · " + escapeHTML(item.summary) + "</div>" +
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
+          '<span class="row-title">' + escapeHTML(item.name) + "</span>" +
+          '<span class="mono-inline">' + escapeHTML(item.ip) + "</span>" +
           "</div>" +
-          '<div class="discover-right">' + actionHTML + "</div>" +
+          '<div class="row-sub">' + escapeHTML(item.category_label) + " · " + escapeHTML(item.summary) + "</div>" +
+          "</div>" +
+          '<div class="row-right">' + actionHTML + "</div>" +
           "</div>"
         );
       })
@@ -940,7 +1110,7 @@
     const list = $("managed-probes-list");
     if (!probes.length) {
       list.innerHTML =
-        '<div class="editor-empty">Aucun service configuré. Utilisez Conteneurs Docker, Scanner mon réseau ou Ajouter manuellement.</div>';
+        '<div class="empty-state">Aucun service configuré. Utilisez Applications Docker, Scanner mon réseau ou Ajouter un appareil.</div>';
       return;
     }
 
@@ -957,25 +1127,34 @@
         let detail = describeProbeTarget(p);
         if (live) {
           cls = live.ok ? "is-ok" : "is-err";
-          stateLabel = live.ok ? "Fonctionne" : "En panne";
-          if (live.summary) detail += " · " + live.summary;
+          stateLabel = live.ok ? "Actif" : "En panne";
+          detail += " · " + humanizeProbeSummary(live);
         }
         return (
-          '<div class="discover-row">' +
-          '<div class="discover-main">' +
-          '<div class="discover-title">' + escapeHTML(p.id) + ' <span class="mono-inline">' + escapeHTML(probeKindLabel(p.kind)) + "</span></div>" +
-          '<div class="discover-sub">' + escapeHTML(detail) + "</div>" +
-          "</div>" +
-          '<div class="discover-right">' +
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
           '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + stateLabel + "</span>" +
+          '<span class="row-title">' + escapeHTML(p.id) + "</span>" +
+          '<span class="row-kind">' + escapeHTML(probeKindLabel(p.kind)) + "</span>" +
+          "</div>" +
+          '<div class="row-sub">' + escapeHTML(detail) + "</div>" +
+          "</div>" +
+          '<div class="row-right">' +
+          '<div class="row-actions">' +
+          '<button type="button" class="inline-action" data-test-managed="' + escapeHTML(p.id) + '">Tester</button>' +
           '<button type="button" class="inline-action" data-edit-probe="' + idx + '">Modifier</button>' +
           '<button type="button" class="inline-danger" data-delete-probe="' + idx + '">Supprimer</button>' +
+          "</div>" +
           "</div>" +
           "</div>"
         );
       })
       .join("");
 
+    list.querySelectorAll("[data-test-managed]").forEach((btn) => {
+      btn.addEventListener("click", () => quickTestProbeByID(btn.dataset.testManaged, btn));
+    });
     list.querySelectorAll("[data-edit-probe]").forEach((btn) => {
       btn.addEventListener("click", () => openProbeModal(Number(btn.dataset.editProbe)));
     });
@@ -1109,7 +1288,7 @@
       case "synology": {
         const isV3 = p.snmp_version === "3";
         simpleHTML =
-          '<div class="help-callout">Sur votre NAS Synology : ouvrez <strong>Panneau de configuration → Terminal et SNMP → SNMP</strong>, cochez <strong>Activer le service SNMP</strong> puis <strong>SNMPv2c</strong> (communauté <code>public</code>).</div>' +
+          '<div class="help-callout">Sur votre NAS Synology : ouvrez <strong>Panneau de configuration → Terminal et SNMP → SNMP</strong>, cochez <strong>Activer le service SNMP</strong> puis <strong>SNMPv2c</strong> (communauté <span class="mono-inline">public</span>).</div>' +
           '<label class="field"><span class="field-label">Adresse IP du NAS</span>' +
           '<input type="text" class="mono" data-mp="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.20" required></label>' +
           '<label class="field"><span class="field-label">Température d\'alerte (°C)</span>' +
@@ -1180,7 +1359,7 @@
 
       case "docker":
         simpleHTML =
-          '<div class="help-callout">Astuce : vous pouvez aussi cocher vos conteneurs visuellement dans l\'onglet <strong>Conteneurs Docker</strong>.</div>' +
+          '<div class="help-callout">Astuce : vous pouvez aussi cocher vos conteneurs visuellement dans l\'onglet <strong>Applications Docker</strong>.</div>' +
           '<label class="field span-2"><span class="field-label">Noms des conteneurs (séparés par des virgules)</span>' +
           '<input type="text" class="mono" data-mp="containers" data-type="csv" value="' + escapeHTML((p.containers || []).join(", ")) + '" placeholder="jellyfin, immich_server, traefik"></label>';
         advHTML =
@@ -1312,10 +1491,10 @@
       }
       if (data.ok) {
         box.classList.add("is-ok");
-        box.textContent = "Connexion réussie (" + (data.latency_ms || 0) + " ms) · " + (data.summary || "OK");
+        box.textContent = "Connexion réussie (" + (data.latency_ms || 0) + " ms) · " + humanizeProbeSummary(data);
       } else {
         box.classList.add("is-err");
-        box.textContent = "Échec du test : " + humanizeError(data.summary || "service injoignable");
+        box.textContent = "Échec du test : " + humanizeProbeSummary(data);
       }
     } catch (err) {
       box.hidden = false;
@@ -1493,7 +1672,7 @@
 
     if (!peers.length) {
       container.innerHTML =
-        '<div class="editor-empty">Aucun ami ajouté pour le moment. Partagez votre code d\'invitation ci-dessus ou collez celui d\'un proche.</div>';
+        '<div class="empty-state">Aucun ami ajouté pour le moment. Partagez votre code d\'invitation ci-dessus ou collez celui d\'un proche.</div>';
       return;
     }
 
@@ -1519,17 +1698,21 @@
             stateLabel = "En ligne";
           }
         }
-        const sub = "Clé publique : " + (p.pubkey_hex || "").slice(0, 18) + "...";
+        const sub = "Identifiant : " + (p.pubkey_hex || "").slice(0, 18) + "...";
         return (
-          '<div class="discover-row">' +
-          '<div class="discover-main">' +
-          '<div class="discover-title">' + escapeHTML(p.name || "Ami sans nom") + "</div>" +
-          '<div class="discover-sub">' + escapeHTML(sub) + "</div>" +
-          "</div>" +
-          '<div class="discover-right">' +
+          '<div class="surface-row">' +
+          '<div class="row-main">' +
+          '<div class="row-title-line">' +
           '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + stateLabel + "</span>" +
+          '<span class="row-title">' + escapeHTML(p.name || "Ami sans nom") + "</span>" +
+          "</div>" +
+          '<div class="row-sub">' + escapeHTML(sub) + "</div>" +
+          "</div>" +
+          '<div class="row-right">' +
+          '<div class="row-actions">' +
           '<button type="button" class="inline-action" data-edit-peer="' + idx + '">Modifier</button>' +
           '<button type="button" class="inline-danger" data-remove-peer="' + idx + '">Retirer</button>' +
+          "</div>" +
           "</div>" +
           "</div>"
         );
@@ -1637,7 +1820,7 @@
           const label = r.ok ? "Envoyé (" + r.latency_ms + " ms)" : "Échec : " + humanizeError(r.error);
           return (
             '<div class="test-output-line">' +
-            '<span class="cell-primary">' + escapeHTML(r.channel === "ntfy" ? "Téléphone (ntfy)" : "iMessage (Photon)") + "</span>" +
+            '<span class="row-title">' + escapeHTML(r.channel === "ntfy" ? "Téléphone (ntfy)" : "iMessage (Photon)") + "</span>" +
             '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + escapeHTML(label) + "</span>" +
             "</div>"
           );
@@ -1665,8 +1848,9 @@
       const { ok, data } = await apiFetch("/api/update/check" + (force ? "?force=1" : ""));
       if (!ok) {
         $("settings-update-headline").textContent = "Vérification indisponible pour le moment";
-        $("settings-update-detail").textContent = data.error || "Impossible de joindre GitHub.";
+        $("settings-update-detail").textContent = data.error || "Impossible de vérifier les mises à jour.";
         $("settings-update-btn").hidden = true;
+        $("nav-update-dot").hidden = true;
         return;
       }
       state.updateInfo = data;
@@ -1686,31 +1870,35 @@
 
     const banner = $("update-banner");
     const settingsBtn = $("settings-update-btn");
+    const navDot = $("nav-update-dot");
+
+    navDot.hidden = !info.update_available;
 
     if (info.update_available) {
       banner.hidden = false;
       $("update-banner-title").textContent = "Nouvelle version disponible : " + info.latest_version;
       $("update-banner-desc").textContent =
-        info.release_name || "Des améliorations et correctifs sont prêts à être installés.";
+        info.release_name || "Des améliorations et correctifs sont prêts à être installés en un clic.";
       $("update-now-btn").textContent = info.can_auto_update ? "Mettre à jour maintenant" : "Voir la mise à jour";
 
       $("settings-update-headline").textContent = "Version " + info.latest_version + " disponible";
       $("settings-update-detail").textContent = info.can_auto_update
-        ? "Cliquez sur Mettre à jour maintenant pour installer automatiquement la nouvelle version."
-        : "Mise à jour manuelle disponible sur GitHub.";
+        ? (info.release_name || "Cliquez sur Mettre à jour maintenant pour installer la nouvelle version automatiquement.")
+        : (info.auto_update_reason || "Mise à jour manuelle disponible sur GitHub.");
       settingsBtn.hidden = false;
       settingsBtn.textContent = info.can_auto_update ? "Mettre à jour maintenant" : "Ouvrir sur GitHub";
     } else if (info.building) {
       banner.hidden = true;
       $("settings-update-headline").textContent = "Nouvelle version en cours de préparation";
       $("settings-update-detail").textContent =
-        "GitHub compile actuellement une nouvelle image Docker (prête dans environ 1 minute). Cliquez sur Vérifier juste après.";
+        "Une image Docker est en cours de compilation (prête dans environ 1 minute). Cliquez sur Vérifier juste après.";
       settingsBtn.hidden = true;
     } else {
       banner.hidden = true;
       $("settings-update-headline").textContent = "Votre MeshWatch est à jour";
+      const suffix = info.auto_update_reason ? " (" + info.auto_update_reason + ")" : "";
       $("settings-update-detail").textContent =
-        "Dernière version publiée : " + (info.latest_version || info.current_version) + ".";
+        "Dernière version publiée : " + (info.latest_version || info.current_version) + "." + suffix;
       settingsBtn.hidden = true;
     }
   }
@@ -1720,7 +1908,7 @@
     if (!info) return;
     if (!info.can_auto_update) {
       if (info.release_url) window.open(info.release_url, "_blank", "noopener");
-      showToast("warn", "Ouvrez GitHub ou lancez docker compose pull && docker compose up -d.");
+      showToast("warn", info.auto_update_reason || "Lancez docker compose pull && docker compose up -d.");
       return;
     }
 
@@ -1818,7 +2006,6 @@
     $("cfg-photon-mode").value = pMode;
     syncPhotonModeVisibility(pMode);
 
-    // Cloud fields
     $("cfg-photon-project-id").value = photon.project_id || "";
     $("cfg-photon-api-key").value = photon.api_key || (pMode === "cloud" ? photon.token || "" : "");
     $("cfg-photon-recipient").value = photon.recipient || "";
@@ -1826,14 +2013,12 @@
     $("cfg-photon-sender-id").value = photon.sender_id || "";
     $("cfg-photon-space-id").value = photon.space_id || "";
 
-    // Proxy fields
     $("cfg-photon-server-url").value = photon.server_url || "";
     $("cfg-photon-proxy-key").value = pMode === "proxy" ? (photon.api_key || "") : "";
     $("cfg-photon-proxy-recipient").value = photon.recipient || "";
     $("cfg-photon-proxy-url").value = pMode === "proxy" ? (photon.url || "https://imessage-swagger.photon.codes") : "https://imessage-swagger.photon.codes";
     $("cfg-photon-proxy-token").value = pMode === "proxy" ? (photon.token || "") : "";
 
-    // Custom webhook fields
     $("cfg-photon-url").value = pMode === "custom" ? (photon.url || "") : "";
     $("cfg-photon-custom-recipient").value = photon.recipient || "";
     $("cfg-photon-token").value = pMode === "custom" ? (photon.token || "") : "";
@@ -2067,7 +2252,7 @@
       showToast("err", err.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = "Vérifier maintenant";
+      btn.textContent = "Vérifier";
     }
   }
 
@@ -2154,6 +2339,7 @@
     });
 
     $("home-add-device-btn").addEventListener("click", () => switchTab("discover"));
+    $("run-all-probes-btn").addEventListener("click", runAllProbesNow);
     $("dismiss-onboarding-btn").addEventListener("click", () => {
       state.onboardingDismissed = true;
       localStorage.setItem("mw_hide_onboarding", "1");
@@ -2178,7 +2364,6 @@
     $("generate-ntfy-btn").addEventListener("click", generateRandomNtfyChannel);
     $("check-wan-btn").addEventListener("click", runCheckWAN);
 
-    // Docker & LAN discovery
     $("scan-docker-btn").addEventListener("click", runDockerScan);
     $("apply-docker-btn").addEventListener("click", applyDockerSelection);
     $("docker-filter-input").addEventListener("input", renderDockerContainers);
@@ -2196,7 +2381,6 @@
       }
     });
 
-    // Guided probe modal
     $("open-add-probe-btn").addEventListener("click", () => openProbeModal(-1));
     $("probe-modal-close").addEventListener("click", closeProbeModal);
     $("probe-modal-back").addEventListener("click", () => {
@@ -2211,7 +2395,6 @@
       btn.addEventListener("click", () => pickProbeKindInModal(btn.dataset.pickKind));
     });
 
-    // Friends 1-click invite & modal
     $("invite-include-group").addEventListener("change", updateInviteCodeDisplay);
     $("my-invite-code").addEventListener("click", (e) => e.target.select());
     $("copy-invite-btn").addEventListener("click", async () => {
@@ -2241,7 +2424,6 @@
     $("friend-modal-cancel").addEventListener("click", closeFriendModal);
     $("friend-modal-form").addEventListener("submit", submitFriendModal);
 
-    // Updates & backup
     $("check-update-btn").addEventListener("click", () => checkUpdates(true));
     $("update-now-btn").addEventListener("click", triggerUpdate);
     $("settings-update-btn").addEventListener("click", triggerUpdate);
@@ -2258,7 +2440,6 @@
       setDirty(true);
     });
 
-    // Track unsaved edits on general / alert / settings forms
     [
       "cfg-node-name",
       "cfg-hb-interval",
@@ -2298,7 +2479,6 @@
       el.addEventListener(evt, () => setDirty(true));
     });
 
-    // Copy & reveal helpers
     document.querySelectorAll("[data-copy]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const input = $(btn.dataset.copy);
@@ -2327,7 +2507,6 @@
       });
     });
 
-    // Close modals with Escape
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         if (!$("probe-modal").hidden) closeProbeModal();
@@ -2335,7 +2514,6 @@
       }
     });
 
-    // Auth form
     $("auth-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       state.token = $("auth-token-input").value.trim();

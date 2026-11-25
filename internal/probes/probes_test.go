@@ -94,6 +94,38 @@ func TestSchedulerConcurrencyAndTimeoutIsolation(t *testing.T) {
 	}
 }
 
+func TestSchedulerRunNow(t *testing.T) {
+	var okState atomic.Bool
+	okState.Store(true)
+
+	p := &stubProbe{
+		id:   "instant",
+		kind: "http",
+		fn: func(ctx context.Context) ProbeResult {
+			return ProbeResult{ID: "instant", Kind: "http", OK: okState.Load(), Summary: "instant check"}
+		},
+	}
+
+	sched := NewScheduler([]ScheduledProbe{
+		{Probe: p, Interval: time.Minute, Timeout: 2 * time.Second},
+	}, nil)
+
+	results, overallOK := sched.RunNow(context.Background())
+	if !overallOK || len(results) != 1 || !results[0].OK {
+		t.Fatalf("expected immediate RunNow OK, got overall=%v results=%+v", overallOK, results)
+	}
+
+	okState.Store(false)
+	results, overallOK = sched.RunNow(context.Background())
+	if overallOK || len(results) != 1 || results[0].OK {
+		t.Fatalf("expected updated false state after RunNow, got overall=%v results=%+v", overallOK, results)
+	}
+	hist := sched.HistorySnapshot()["instant"]
+	if len(hist) < 2 {
+		t.Fatalf("expected >= 2 history points recorded, got %d", len(hist))
+	}
+}
+
 func makeSelfSignedCert(t *testing.T, notBefore, notAfter time.Time) tls.Certificate {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

@@ -49,6 +49,12 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "commit=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "commit_msg<<__EOF__"
+            git log -1 --pretty=%s | tr '\n\r' ' ' | cut -c1-140
+            echo ""
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build image
         run: |
@@ -56,6 +62,7 @@ jobs:
             --build-arg VERSION="${{ steps.meta.outputs.version }}" \
             --build-arg COMMIT="${{ steps.meta.outputs.commit }}" \
             --build-arg BUILD_DATE="${{ steps.meta.outputs.date }}" \
+            --build-arg COMMIT_MSG="${{ steps.meta.outputs.commit_msg }}" \
             -t meshwatch:ci .
 
       - name: Verify image size and keygen smoke test

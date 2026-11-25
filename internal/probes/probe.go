@@ -204,6 +204,30 @@ func (s *Scheduler) Snapshot() (results []ProbeResult, overallOK bool) {
 	return results, overallOK
 }
 
+// RunNow executes all configured probes immediately in parallel, updates cached results
+// and history, and returns the fresh snapshot.
+func (s *Scheduler) RunNow(ctx context.Context) ([]ProbeResult, bool) {
+	s.mu.RLock()
+	list := make([]ScheduledProbe, len(s.probes))
+	copy(list, s.probes)
+	s.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	for _, sp := range list {
+		timeout := sp.Timeout
+		if timeout <= 0 {
+			timeout = config.DefaultProbeTimeout
+		}
+		wg.Add(1)
+		go func(p Probe, to time.Duration) {
+			defer wg.Done()
+			s.execOnce(ctx, p, to)
+		}(sp.Probe, timeout)
+	}
+	wg.Wait()
+	return s.Snapshot()
+}
+
 // HistorySnapshot returns a copy of the recent check history for each probe.
 func (s *Scheduler) HistorySnapshot() map[string][]HistoryPoint {
 	s.mu.RLock()
