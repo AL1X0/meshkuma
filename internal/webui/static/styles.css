@@ -1144,10 +1144,19 @@ textarea:focus {
 
 .test-output-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   padding: 4px 0;
+}
+
+.test-output-line .status-cell {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  line-height: 1.45;
 }
 
 /* ---------------- MODALS & BARS ---------------- */

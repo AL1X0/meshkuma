@@ -545,29 +545,29 @@
           <label class="field span-2">
             <span class="field-label">Mode de connexion Photon</span>
             <select id="cfg-photon-mode">
-              <option value="cloud">Photon Cloud (app.photon.codes : Project ID + Clé API)</option>
+              <option value="cloud">Photon Cloud (app.photon.codes ou Beta : Project ID + Secret)</option>
               <option value="proxy">Photon HTTP Proxy (serveur Mac / imessage-swagger.photon.codes)</option>
               <option value="custom">Webhook HTTP personnalisé</option>
             </select>
           </label>
         </div>
 
-        <!-- MODE CLOUD -->
+        <!-- MODE CLOUD / SPECTRUM -->
         <div id="photon-mode-cloud">
           <ol class="guide-steps">
-            <li>Sur <strong>app.beta.photon.codes</strong>, assignez une ligne iMessage à votre numéro ou email Apple.</li>
-            <li>Envoyez un premier message iMessage depuis votre iPhone vers cette ligne.</li>
-            <li>Collez votre <strong>Project ID</strong> (<span class="mono-inline">pho_prj_...</span>), votre <strong>Clé API</strong> (<span class="mono-inline">pho_sk_...</span>) et votre destinataire ci-dessous.</li>
+            <li>Sur <strong>app.photon.codes</strong> (Stable) ou <strong>app.beta.photon.codes</strong>, ouvrez votre projet puis copiez son <strong>Project ID</strong> et son <strong>Project Secret / Clé API</strong>.</li>
+            <li>Si vous utilisez une ligne partagée, envoyez un premier message iMessage depuis votre iPhone vers le numéro attribué au projet.</li>
+            <li>Indiquez vos identifiants et votre numéro ou email Apple ci-dessous (MeshWatch détecte automatiquement la bonne version Photon).</li>
           </ol>
           <div class="form-grid three-col">
             <label class="field">
               <span class="field-label">Project ID Photon</span>
-              <input id="cfg-photon-project-id" type="text" class="mono" placeholder="pho_prj_...">
+              <input id="cfg-photon-project-id" type="text" class="mono" placeholder="UUID ou pho_prj_...">
             </label>
             <div class="field">
-              <span class="field-label">Clé API projet</span>
+              <span class="field-label">Project Secret ou Clé API</span>
               <div class="input-with-action">
-                <input id="cfg-photon-api-key" type="password" class="mono" autocomplete="off" placeholder="pho_sk_...">
+                <input id="cfg-photon-api-key" type="password" class="mono" autocomplete="off" placeholder="Secret projet ou pho_sk_...">
                 <button type="button" class="field-action" data-toggle-secret="cfg-photon-api-key">Afficher</button>
               </div>
             </div>
@@ -577,18 +577,18 @@
             </label>
           </div>
           <details class="advanced-fold">
-            <summary>Options avancées Photon Cloud (API URL, Space ID, Sender ID)</summary>
+            <summary>Options avancées Photon Cloud (URL API, Space ID, Sender ID)</summary>
             <div class="form-grid three-col fold-body">
               <label class="field">
-                <span class="field-label">URL API Photon</span>
-                <input id="cfg-photon-cloud-url" type="url" class="mono" placeholder="https://api.photon.codes/v1">
+                <span class="field-label">URL API Photon (optionnel)</span>
+                <input id="cfg-photon-cloud-url" type="url" class="mono" placeholder="Automatique (spectrum.photon.codes ou api.photon.codes)">
               </label>
               <label class="field">
-                <span class="field-label">Sender ID (détecté auto)</span>
+                <span class="field-label">Sender ID (optionnel)</span>
                 <input id="cfg-photon-sender-id" type="text" class="mono" placeholder="pho_usr_...">
               </label>
               <label class="field">
-                <span class="field-label">Space ID (détecté auto)</span>
+                <span class="field-label">Space ID (optionnel)</span>
                 <input id="cfg-photon-space-id" type="text" class="mono" placeholder="pho_spc_...">
               </label>
             </div>

@@ -141,8 +141,9 @@ type NtfyConfig struct {
 
 // PhotonConfig configures the Photon iMessage notification connector.
 // Supported modes:
-//   - "cloud": Photon 2.0 Cloud API (https://api.photon.codes/v1) using project_id + api_key (pho_sk_...)
-//   - "proxy": Photon Advanced iMessage HTTP Proxy (https://imessage-swagger.photon.codes/send) using server_url + api_key (or pre-encoded token)
+//   - "cloud" / "spectrum": automatically uses Photon Stable (Spectrum Basic auth + HTTP/2 gRPC) for UUID Project IDs,
+//     or Photon Beta 2.0 (`https://api.photon.codes/v1`) for `pho_prj_` / `pho_sk_` credentials
+//   - "proxy": Photon Advanced iMessage HTTP Proxy (`https://imessage-swagger.photon.codes/send`)
 //   - "custom": generic JSON webhook with configurable recipient_field / message_field
 type PhotonConfig struct {
 	Enabled        bool   `yaml:"enabled"`
@@ -159,15 +160,16 @@ type PhotonConfig struct {
 	MessageField   string `yaml:"message_field"`
 }
 
-// EffectiveMode infers the Photon transport mode ("cloud", "proxy", or "custom").
+// EffectiveMode infers the Photon transport mode ("cloud", "spectrum", "proxy", or "custom").
 func (p PhotonConfig) EffectiveMode() string {
 	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
-	case "cloud", "proxy", "custom":
+	case "cloud", "spectrum", "proxy", "custom":
 		return strings.ToLower(strings.TrimSpace(p.Mode))
 	}
 	if strings.TrimSpace(p.ProjectID) != "" ||
 		strings.HasPrefix(strings.TrimSpace(p.APIKey), "pho_") ||
-		strings.Contains(strings.ToLower(p.URL), "api.photon.codes") {
+		strings.Contains(strings.ToLower(p.URL), "api.photon.codes") ||
+		strings.Contains(strings.ToLower(p.URL), "spectrum.photon.codes") {
 		return "cloud"
 	}
 	if strings.TrimSpace(p.ServerURL) != "" ||
@@ -416,11 +418,11 @@ func (c *Config) Validate() error {
 		ph := &c.Notifications.PhotonIMessage
 		mode := ph.EffectiveMode()
 		switch mode {
-		case "cloud":
-			if strings.TrimSpace(ph.URL) == "" {
-				ph.URL = "https://api.photon.codes/v1"
-			} else if err := validateHTTPURL(ph.URL); err != nil {
-				errs = append(errs, fmt.Errorf("notifications.photon_imessage.url: %w", err))
+		case "cloud", "spectrum":
+			if strings.TrimSpace(ph.URL) != "" {
+				if err := validateHTTPURL(ph.URL); err != nil {
+					errs = append(errs, fmt.Errorf("notifications.photon_imessage.url: %w", err))
+				}
 			}
 			if strings.TrimSpace(ph.ProjectID) == "" {
 				errs = append(errs, errors.New("notifications.photon_imessage.project_id is required in cloud mode"))
@@ -429,7 +431,7 @@ func (c *Config) Validate() error {
 				errs = append(errs, errors.New("notifications.photon_imessage.api_key is required in cloud mode"))
 			}
 			if strings.TrimSpace(ph.Recipient) == "" && (strings.TrimSpace(ph.SpaceID) == "" || strings.TrimSpace(ph.SenderID) == "") {
-				errs = append(errs, errors.New("notifications.photon_imessage.recipient (or space_id + sender_id) is required in cloud mode"))
+				errs = append(errs, errors.New("notifications.photon_imessage.recipient is required in cloud mode"))
 			}
 		case "proxy":
 			if strings.TrimSpace(ph.URL) == "" {

@@ -2009,7 +2009,7 @@
     $("cfg-photon-project-id").value = photon.project_id || "";
     $("cfg-photon-api-key").value = photon.api_key || (pMode === "cloud" ? photon.token || "" : "");
     $("cfg-photon-recipient").value = photon.recipient || "";
-    $("cfg-photon-cloud-url").value = pMode === "cloud" ? (photon.url || "https://api.photon.codes/v1") : "https://api.photon.codes/v1";
+    $("cfg-photon-cloud-url").value = pMode === "cloud" ? (photon.url || "") : "";
     $("cfg-photon-sender-id").value = photon.sender_id || "";
     $("cfg-photon-space-id").value = photon.space_id || "";
 
@@ -2047,8 +2047,10 @@
   function inferPhotonMode(ph) {
     if (!ph) return "cloud";
     const m = String(ph.mode || "").toLowerCase().trim();
-    if (m === "cloud" || m === "proxy" || m === "custom") return m;
-    if (ph.project_id || String(ph.api_key || "").startsWith("pho_") || String(ph.url || "").includes("api.photon.codes")) {
+    if (m === "cloud" || m === "spectrum" || m === "proxy" || m === "custom") {
+      return m === "spectrum" ? "cloud" : m;
+    }
+    if (ph.project_id || String(ph.api_key || "").startsWith("pho_") || String(ph.url || "").includes("api.photon.codes") || String(ph.url || "").includes("spectrum.photon.codes")) {
       return "cloud";
     }
     if (ph.server_url || String(ph.url || "").includes("imessage-swagger.photon.codes")) {
@@ -2071,7 +2073,7 @@
       return {
         enabled,
         mode: "cloud",
-        url: $("cfg-photon-cloud-url").value.trim() || "https://api.photon.codes/v1",
+        url: $("cfg-photon-cloud-url").value.trim(),
         project_id: $("cfg-photon-project-id").value.trim(),
         api_key: $("cfg-photon-api-key").value.trim(),
         recipient: $("cfg-photon-recipient").value.trim(),
