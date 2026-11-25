@@ -129,6 +129,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	mux.HandleFunc("POST /api/validate", s.requireAuth(s.requireJSON(s.handleValidate)))
 	mux.HandleFunc("POST /api/keygen", s.requireAuth(s.requireJSON(s.handleKeygen)))
 	mux.HandleFunc("POST /api/test-notify", s.requireAuth(s.requireJSON(s.handleTestNotify)))
+	mux.HandleFunc("POST /api/probes/test", s.requireAuth(s.requireJSON(s.handleTestProbe)))
 	mux.HandleFunc("POST /api/check-automute", s.requireAuth(s.requireJSON(s.handleCheckAutoMute)))
 	mux.HandleFunc("GET /api/discover/info", s.requireAuth(s.handleDiscoverInfo))
 	mux.HandleFunc("POST /api/discover/docker", s.requireAuth(s.requireJSON(s.handleDiscoverDocker)))
@@ -524,6 +525,60 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		"ok":      allOK,
 		"results": results,
 	})
+}
+
+func (s *Server) handleTestProbe(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxAPIBodyBytes))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "impossible de lire la requête")
+		return
+	}
+	var req struct {
+		Probe *ProbeDTO `json:"probe"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || req.Probe == nil {
+		writeJSONError(w, http.StatusBadRequest, "paramètres du service invalides")
+		return
+	}
+	p := *req.Probe
+	if strings.TrimSpace(p.ID) == "" {
+		p.ID = "test-service"
+	}
+
+	probeWrapper := ConfigDTO{
+		Node: NodeDTO{
+			Name:          "test-probe",
+			PrivateKeyHex: "0000000000000000000000000000000000000000000000000000000000000001",
+			GroupPSKHex:   "0000000000000000000000000000000000000000000000000000000000000002",
+		},
+		Nostr:  NostrDTO{Relays: []string{"wss://nos.lol"}},
+		Probes: []ProbeDTO{p},
+	}
+	raw, err := dtoToYAML(probeWrapper)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	parsed, err := config.Parse(raw)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	built, err := probes.BuildFromConfig(parsed.Probes)
+	if err != nil || len(built) == 0 {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("service invalide : %v", err))
+		return
+	}
+
+	timeout := built[0].Timeout
+	if timeout <= 0 || timeout > 10*time.Second {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	res := built[0].Probe.Check(ctx)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleCheckAutoMute(w http.ResponseWriter, r *http.Request) {

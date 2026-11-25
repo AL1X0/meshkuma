@@ -189,6 +189,34 @@ func TestWebUIServerEndpointsAndAuth(t *testing.T) {
 		t.Fatalf("test-notify failed: code=%d ntfyCalled=%v body=%s", rec.Code, ntfyCalled, rec.Body.String())
 	}
 
+	// 6b. POST /api/probes/test verifies a single probe live
+	probeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer probeSrv.Close()
+
+	probePayload, _ := json.Marshal(map[string]any{
+		"probe": map[string]any{
+			"id":              "live-http",
+			"kind":            "http",
+			"url":             probeSrv.URL,
+			"expected_status": 200,
+		},
+	})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/probes/test", bytes.NewReader(probePayload))
+	req.Header.Set("Authorization", "Bearer super-secret-token")
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probes/test status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var pRes probes.ProbeResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &pRes); err != nil || !pRes.OK {
+		t.Fatalf("probes/test unexpected result: %+v err=%v", pRes, err)
+	}
+
 	// 7. Embedded static assets serve cleanly with security headers
 	for _, tc := range []struct {
 		path    string

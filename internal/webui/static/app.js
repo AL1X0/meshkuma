@@ -1,12 +1,21 @@
 (() => {
   const PROBE_KINDS = [
+    { value: "http", label: "Site ou application web" },
     { value: "synology", label: "NAS Synology" },
     { value: "docker", label: "Applications Docker" },
+    { value: "tcp", label: "Appareil réseau (port)" },
     { value: "node_exporter", label: "Serveur Linux" },
     { value: "windows_exporter", label: "Serveur Windows" },
-    { value: "http", label: "Site ou application web" },
-    { value: "tcp", label: "Port réseau (TCP)" },
-    { value: "snmp_oid", label: "Capteur SNMP personnalisé" }
+    { value: "snmp_oid", label: "Capteur SNMP" }
+  ];
+
+  const TCP_PORT_PRESETS = [
+    { port: 22, label: "SSH (port 22)" },
+    { port: 80, label: "Web HTTP (port 80)" },
+    { port: 443, label: "Web HTTPS (port 443)" },
+    { port: 445, label: "Partage fichiers SMB (port 445)" },
+    { port: 3389, label: "Bureau à distance (port 3389)" },
+    { port: 5000, label: "Synology DSM (port 5000)" }
   ];
 
   const state = {
@@ -15,12 +24,12 @@
     activeSubTab: "docker",
     status: null,
     config: null,
+    savedConfigSnapshot: null,
     rawYAML: "",
-    yamlEditedDirectly: false,
     configPath: "",
     writable: true,
     dirty: false,
-    selectedProbeIndex: 0,
+    onboardingDismissed: localStorage.getItem("mw_hide_onboarding") === "1",
     dockerContainers: [],
     dockerSelected: new Set(),
     dockerScannedOnce: false,
@@ -28,15 +37,21 @@
     lanItems: [],
     lanScanSummary: "",
     updateInfo: null,
+    parsedInvite: null,
+    modalProbeIndex: -1,
+    modalProbeDraft: null,
+    modalFriendIndex: -1,
+    toastTimer: null,
     pollHandle: null
   };
 
   const $ = (id) => document.getElementById(id);
 
+  /* ---------------- THEME & HELPERS ---------------- */
+
   function initTheme() {
     const saved = localStorage.getItem("mw_theme");
-    const theme = saved === "dark" ? "dark" : "light";
-    applyTheme(theme);
+    applyTheme(saved === "dark" ? "dark" : "light");
     document.querySelectorAll("[data-theme-choice]").forEach((btn) => {
       btn.addEventListener("click", () => applyTheme(btn.dataset.themeChoice));
     });
@@ -53,25 +68,141 @@
     if (state.status) renderTopology(state.status);
   }
 
-  function setDirty(flag) {
-    state.dirty = flag;
-    const btn = $("save-btn");
-    if (btn) btn.classList.toggle("has-dirty", flag);
+  function deepClone(obj) {
+    return JSON.parse(JSON.stringify(obj));
   }
 
-  function showFeedback(kind, message) {
-    const bar = $("feedback-bar");
-    bar.className = "feedback-bar";
+  function setDirty(flag) {
+    state.dirty = flag;
+    const bar = $("unsaved-bar");
+    if (bar) bar.hidden = !flag;
+  }
+
+  function showToast(kind, message, durationMs) {
+    const bar = $("toast-bar");
+    if (!bar) return;
+    if (state.toastTimer) clearTimeout(state.toastTimer);
+    bar.className = "toast-bar";
     if (kind === "ok") bar.classList.add("is-ok");
     if (kind === "err") bar.classList.add("is-err");
     if (kind === "warn") bar.classList.add("is-warn");
     bar.textContent = message;
     bar.hidden = false;
+    state.toastTimer = setTimeout(() => {
+      bar.hidden = true;
+    }, durationMs || (kind === "err" ? 6500 : 4000));
   }
 
-  function clearFeedback() {
-    $("feedback-bar").hidden = true;
+  function escapeHTML(str) {
+    return String(str == null ? "" : str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
+
+  function formatDurationSec(sec) {
+    const s = Math.max(0, Math.floor(sec || 0));
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + " min";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + "h " + (m % 60) + "m";
+    const d = Math.floor(h / 24);
+    return d + "j " + (h % 24) + "h";
+  }
+
+  function formatRelativeTime(iso) {
+    if (!iso) return "En attente";
+    const diff = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+    if (diff < 5) return "À l'instant";
+    if (diff < 60) return "Il y a " + diff + "s";
+    if (diff < 3600) return "Il y a " + Math.floor(diff / 60) + " min";
+    return "Il y a " + Math.floor(diff / 3600) + "h";
+  }
+
+  function probeKindLabel(kind) {
+    const match = PROBE_KINDS.find((k) => k.value === kind);
+    return match ? match.label : kind;
+  }
+
+  function normalizeDurationSelect(selectEl, val) {
+    if (!selectEl || !val) return;
+    const normalized = String(val).trim();
+    const map = { "90s": "1m30s", "60s": "1m", "120s": "2m", "180s": "3m", "300s": "5m" };
+    const candidate = map[normalized] || normalized;
+    let found = false;
+    for (let i = 0; i < selectEl.options.length; i++) {
+      if (selectEl.options[i].value === candidate) {
+        selectEl.selectedIndex = i;
+        found = true;
+        break;
+      }
+    }
+    if (!found && normalized) {
+      const opt = document.createElement("option");
+      opt.value = normalized;
+      opt.textContent = "Personnalisé (" + normalized + ")";
+      selectEl.appendChild(opt);
+      selectEl.value = normalized;
+    }
+  }
+
+  function slugifyID(name, fallback) {
+    const clean = String(name || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return clean || fallback || "service";
+  }
+
+  function ensureUniqueProbeID(base, excludeIdx) {
+    const existing = new Set(
+      ((state.config && state.config.probes) || [])
+        .map((p, i) => (i === excludeIdx ? "" : p.id))
+        .filter(Boolean)
+    );
+    let cand = base || "service";
+    let n = 2;
+    while (existing.has(cand)) {
+      cand = base + "-" + n;
+      n++;
+    }
+    return cand;
+  }
+
+  function extractHostFromExporterURL(url, defaultPort) {
+    const s = String(url || "").trim();
+    if (!s) return "";
+    try {
+      const u = new URL(s);
+      if (u.pathname === "/metrics" && (!u.port || Number(u.port) === defaultPort)) {
+        return u.hostname;
+      }
+    } catch (_) {}
+    return s;
+  }
+
+  function buildExporterURL(input, defaultPort) {
+    const s = String(input || "").trim();
+    if (!s) return "";
+    if (/^https?:\/\//i.test(s)) return s;
+    const hasPort = /:\d+$/.test(s);
+    return "http://" + s + (hasPort ? "" : ":" + defaultPort) + "/metrics";
+  }
+
+  function humanizeError(raw) {
+    const s = String(raw || "");
+    if (/connection refused/i.test(s)) return "L'appareil a refusé la connexion. Vérifiez que le service est démarré et le port correct.";
+    if (/no route to host|network is unreachable/i.test(s)) return "Adresse introuvable sur votre réseau local. Vérifiez l'adresse IP.";
+    if (/i\/o timeout|deadline exceeded|timeout/i.test(s)) return "Aucune réponse reçue (délai dépassé). Vérifiez l'adresse IP, le pare-feu ou l'activation SNMP.";
+    if (/no such host/i.test(s)) return "Nom de domaine ou d'appareil introuvable.";
+    return s;
+  }
+
+  /* ---------------- API ---------------- */
 
   async function apiFetch(path, options = {}) {
     const headers = Object.assign({}, options.headers || {});
@@ -110,7 +241,9 @@
     $("auth-error").hidden = true;
   }
 
-  function switchTab(tab) {
+  /* ---------------- NAVIGATION ---------------- */
+
+  function switchTab(tab, subTab) {
     state.activeTab = tab;
     document.querySelectorAll(".nav-tab").forEach((btn) => {
       const active = btn.dataset.tab === tab;
@@ -122,8 +255,14 @@
       panel.classList.toggle("is-active", active);
       panel.hidden = !active;
     });
-    if (tab === "discover" && state.activeSubTab === "docker" && !state.dockerScannedOnce) {
-      runDockerScan();
+    if (tab === "discover") {
+      if (subTab) switchSubTab(subTab);
+      else if (state.activeSubTab === "docker" && !state.dockerScannedOnce) runDockerScan();
+      else if (state.activeSubTab === "managed") renderManagedProbes();
+    }
+    if (tab === "friends") {
+      updateInviteCodeDisplay();
+      renderPeersList();
     }
   }
 
@@ -139,45 +278,8 @@
       panel.classList.toggle("is-active", active);
       panel.hidden = !active;
     });
-    if (sub === "docker" && !state.dockerScannedOnce) {
-      runDockerScan();
-    }
-    if (sub === "managed") {
-      renderProbesWorkspace();
-    }
-  }
-
-  function escapeHTML(str) {
-    return String(str == null ? "" : str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  function formatDurationSec(sec) {
-    const s = Math.max(0, Math.floor(sec || 0));
-    if (s < 60) return s + "s";
-    const m = Math.floor(s / 60);
-    if (m < 60) return m + " min";
-    const h = Math.floor(m / 60);
-    if (h < 24) return h + "h " + (m % 60) + "m";
-    const d = Math.floor(h / 24);
-    return d + "j " + (h % 24) + "h";
-  }
-
-  function formatRelativeTime(iso) {
-    if (!iso) return "Jamais reçu";
-    const diff = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-    if (diff < 5) return "À l'instant";
-    if (diff < 60) return "Il y a " + diff + "s";
-    if (diff < 3600) return "Il y a " + Math.floor(diff / 60) + " min";
-    return "Il y a " + Math.floor(diff / 3600) + "h";
-  }
-
-  function probeKindLabel(kind) {
-    const match = PROBE_KINDS.find((k) => k.value === kind);
-    return match ? match.label : kind;
+    if (sub === "docker" && !state.dockerScannedOnce) runDockerScan();
+    if (sub === "managed") renderManagedProbes();
   }
 
   /* ---------------- ACCUEIL ---------------- */
@@ -186,13 +288,7 @@
     state.status = st;
 
     const setupNotice = $("setup-notice");
-    if (st.mode === "setup") {
-      setupNotice.hidden = false;
-      $("setup-notice-detail").textContent =
-        "Cliquez sur Créer mon identité pour démarrer automatiquement votre supervision privée.";
-    } else {
-      setupNotice.hidden = true;
-    }
+    setupNotice.hidden = st.mode !== "setup";
 
     const probes = st.probes || [];
     const okProbes = probes.filter((p) => p.ok).length;
@@ -206,20 +302,20 @@
 
     if (st.mode === "setup") {
       $("ov-headline").textContent = "Prêt à démarrer";
-      $("ov-subtitle").textContent = "Générez votre identité puis scannez vos conteneurs Docker ou votre réseau local.";
+      $("ov-subtitle").textContent = "Cliquez sur Démarrer en un clic ci-dessus pour activer votre supervision privée.";
     } else if (st.muted) {
-      $("ov-headline").textContent = "Connexion Internet interrompue";
-      $("ov-subtitle").textContent = "Les alertes sont temporairement mises en sourdine pour éviter tout faux positif.";
+      $("ov-headline").textContent = "Accès Internet interrompu";
+      $("ov-subtitle").textContent = "Les alertes sont mises en pause automatiquement pour éviter les fausses alertes.";
     } else if (failedProbes > 0) {
       $("ov-headline").textContent =
         failedProbes === 1 ? "1 service demande votre attention" : failedProbes + " services demandent votre attention";
       $("ov-subtitle").textContent = (st.node_name || "Votre serveur") + " surveille " + probes.length + " service(s) en local.";
     } else if (probes.length === 0) {
-      $("ov-headline").textContent = (st.node_name || "Votre maison") + " est connecté";
-      $("ov-subtitle").textContent = "Ajoutez vos premiers appareils ou conteneurs Docker dans l'onglet Découvrir.";
+      $("ov-headline").textContent = (st.node_name || "Votre espace") + " est prêt";
+      $("ov-subtitle").textContent = "Ajoutez vos premiers appareils ou conteneurs Docker dans l'onglet Appareils.";
     } else {
       $("ov-headline").textContent = "Tout fonctionne sur " + (st.node_name || "votre homelab");
-      $("ov-subtitle").textContent = "Vos " + probes.length + " services répondent normalement. Zéro port entrant ouvert.";
+      $("ov-subtitle").textContent = "Vos " + probes.length + " services répondent normalement. Aucun port ouvert sur Internet.";
     }
 
     $("metric-probes").textContent = okProbes + " / " + probes.length;
@@ -227,8 +323,8 @@
       probes.length === 0
         ? "Cliquez sur Ajouter un appareil"
         : failedProbes === 0
-          ? "Tous les services répondent"
-          : failedProbes + " problème(s) détecté(s)";
+          ? "Tous les services fonctionnent"
+          : failedProbes + " alerte(s) en cours";
 
     $("metric-peers").textContent = onlinePeers + " / " + peers.length;
     $("metric-peers-sub").textContent =
@@ -236,13 +332,13 @@
         ? "Ajoutez un ami pour vous entraider"
         : onlinePeers === peers.length
           ? "Tous vos amis sont en ligne"
-          : (peers.length - onlinePeers) + " ami(s) silencieux";
+          : (peers.length - onlinePeers) + " ami(s) hors ligne";
 
     $("metric-relays").textContent = connRelays + " / " + relays.length;
     $("metric-relays-sub").textContent = connRelays > 0 ? "Échanges chiffrés actifs" : "Reconnexion en cours";
 
-    $("metric-wan").textContent = st.muted ? "Coupée" : "Connectée";
-    $("ov-uptime").textContent = "En marche depuis " + formatDurationSec(st.uptime_sec);
+    $("metric-wan").textContent = st.muted ? "Coupé" : "Connecté";
+    $("ov-uptime").textContent = "Actif depuis " + formatDurationSec(st.uptime_sec);
 
     if (st.pubkey_hex) $("id-pubkey").value = st.pubkey_hex;
     if (st.topic_tag) $("id-topic-tag").value = st.topic_tag;
@@ -250,22 +346,65 @@
       $("settings-version-label").textContent = st.version + (st.commit ? " (" + st.commit + ")" : "");
     }
 
+    renderOnboardingChecklist(st);
     renderHomeProbes(probes);
     renderHomePeers(peers);
     renderTopology(st);
+    if (state.activeTab === "discover" && state.activeSubTab === "managed") renderManagedProbes();
+    if (state.activeTab === "friends") renderPeersList();
+  }
+
+  function renderOnboardingChecklist(st) {
+    const card = $("onboarding-card");
+    if (!card) return;
+    if (st.mode === "setup" || state.onboardingDismissed) {
+      card.hidden = true;
+      return;
+    }
+
+    const cfgProbes = (state.config && state.config.probes) || [];
+    const cfgPeers = (state.config && state.config.peers) || [];
+    const hasDevices = cfgProbes.length > 0 || (st.probes && st.probes.length > 0);
+    const hasAlerts = Boolean(
+      (st.notifications && (st.notifications.ntfy_enabled || st.notifications.photon_enabled)) ||
+      (state.config && state.config.notifications && (
+        (state.config.notifications.ntfy && state.config.notifications.ntfy.enabled) ||
+        (state.config.notifications.photon_imessage && state.config.notifications.photon_imessage.enabled)
+      ))
+    );
+    const hasFriends = cfgPeers.length > 0 || (st.peers && st.peers.length > 0);
+
+    const doneCount = (hasDevices ? 1 : 0) + (hasAlerts ? 1 : 0) + (hasFriends ? 1 : 0);
+    if (doneCount === 3) {
+      card.hidden = true;
+      return;
+    }
+
+    card.hidden = false;
+    $("onboarding-progress").textContent = doneCount + " sur 3 étapes terminées. Tout se configure directement ici.";
+
+    const applyStep = (id, done, num) => {
+      const btn = $(id);
+      const mark = $(id + "-mark");
+      btn.classList.toggle("is-done", done);
+      mark.textContent = done ? "✓" : String(num);
+    };
+    applyStep("step-devices", hasDevices, 1);
+    applyStep("step-alerts", hasAlerts, 2);
+    applyStep("step-friends", hasFriends, 3);
   }
 
   function renderHomeProbes(probes) {
     const tbody = $("ov-probes-body");
     if (!probes.length) {
       tbody.innerHTML =
-        '<tr><td colspan="5" class="empty-row">Aucun service surveillé pour le moment. Ouvrez Découvrir pour scanner Docker ou votre réseau en un clic.</td></tr>';
+        '<tr><td colspan="6" class="empty-row">Aucun service surveillé. Ouvrez Appareils pour cocher vos conteneurs Docker ou scanner votre réseau en un clic.</td></tr>';
       return;
     }
     tbody.innerHTML = probes
       .map((p) => {
         const cls = p.ok ? "is-ok" : "is-err";
-        const label = p.ok ? "Tout va bien" : "En panne";
+        const label = p.ok ? "Fonctionne" : "En panne";
         const lat = p.latency_ms != null ? p.latency_ms + " ms" : "0 ms";
         return (
           "<tr>" +
@@ -274,17 +413,26 @@
           '<td><span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span></td>" +
           "<td>" + escapeHTML(p.summary || "") + "</td>" +
           '<td class="num-col tabular">' + escapeHTML(lat) + "</td>" +
+          '<td class="num-col"><button type="button" class="inline-action" data-edit-probe-id="' + escapeHTML(p.id) + '">Modifier</button></td>' +
           "</tr>"
         );
       })
       .join("");
+
+    tbody.querySelectorAll("[data-edit-probe-id]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = btn.dataset.editProbeId;
+        const idx = ((state.config && state.config.probes) || []).findIndex((pr) => pr.id === id);
+        if (idx >= 0) openProbeModal(idx);
+      });
+    });
   }
 
   function renderHomePeers(peers) {
     const tbody = $("ov-peers-body");
     if (!peers.length) {
       tbody.innerHTML =
-        '<tr><td colspan="4" class="empty-row">Aucun ami ajouté. Rendez-vous dans Mes amis pour partager votre code et vous surveiller mutuellement.</td></tr>';
+        '<tr><td colspan="4" class="empty-row">Aucun ami connecté pour le moment. Ouvrez Mes amis pour copier votre code d\'invitation.</td></tr>';
       return;
     }
     tbody.innerHTML = peers
@@ -293,18 +441,18 @@
         let label = "En attente";
         if (p.timed_out) {
           cls = "is-err";
-          label = "Injoignable";
+          label = "Hors ligne";
         } else if (p.online && !p.overall_ok) {
           cls = "is-warn";
           label = "Un service en alerte";
         } else if (p.online) {
           cls = "is-ok";
-          label = "Tout va bien";
+          label = "En ligne";
         }
 
         const failing = (p.probes || []).filter((pr) => !pr.ok);
         const subLine = failing.length
-          ? '<span class="cell-secondary">' + escapeHTML(failing.map((f) => f.id + ": " + f.summary).join("; ")) + "</span>"
+          ? '<span class="cell-secondary">' + escapeHTML(failing.map((f) => f.id + " : " + f.summary).join(" · ")) + "</span>"
           : "";
 
         return (
@@ -339,7 +487,7 @@
     const connRelays = relays.filter((r) => r.connected).length;
 
     const peerCount = Math.max(peers.length, 1);
-    const viewH = Math.max(240, 70 + peerCount * 68);
+    const viewH = Math.max(230, 70 + peerCount * 68);
     svg.setAttribute("viewBox", "0 0 960 " + viewH);
 
     const midY = Math.round(viewH / 2);
@@ -347,7 +495,7 @@
     const relayColor = connRelays > 0 ? cAccent : cMuted;
 
     let out = "";
-    out += '<g stroke="' + cBorder + '" stroke-opacity="0.2" stroke-width="1">';
+    out += '<g stroke="' + cBorder + '" stroke-opacity="0.18" stroke-width="1">';
     for (let x = 120; x < 960; x += 120) {
       out += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="' + viewH + '"/>';
     }
@@ -367,7 +515,7 @@
         '<g class="topo-node" data-topo-tab="friends">' +
         '<rect x="690" y="' + (midY - 30) + '" width="234" height="60" rx="10" fill="' + cSubtle + '" stroke="' + cBorder + '" stroke-dasharray="4 4" stroke-width="1.3"/>' +
         '<text x="710" y="' + (midY - 4) + '" fill="' + cText + '" font-size="15" font-weight="600">Inviter un ami</text>' +
-        '<text x="710" y="' + (midY + 16) + '" fill="' + cMuted + '" font-size="13">Cliquer pour ajouter un proche</text>' +
+        '<text x="710" y="' + (midY + 16) + '" fill="' + cMuted + '" font-size="13">Partager un code en 1 clic</text>' +
         "</g>";
     } else {
       peers.forEach((peer, i) => {
@@ -376,13 +524,13 @@
         let pState = "En attente";
         if (peer.timed_out) {
           pColor = cErr;
-          pState = "Injoignable";
+          pState = "Hors ligne";
         } else if (peer.online && !peer.overall_ok) {
           pColor = cWarn;
           pState = "Alerte détectée";
         } else if (peer.online) {
           pColor = cOk;
-          pState = "Tout va bien";
+          pState = "En ligne";
         }
         out +=
           '<path d="M 585 ' + midY + " C 638 " + midY + ", 638 " + py + ", 690 " + py +
@@ -401,8 +549,8 @@
     out +=
       '<g class="topo-node" data-topo-tab="settings">' +
       '<rect x="375" y="' + (midY - 44) + '" width="210" height="88" rx="10" fill="' + cSubtle + '" stroke="' + relayColor + '" stroke-width="1.6"/>' +
-      '<text x="480" y="' + (midY - 12) + '" text-anchor="middle" fill="' + cText + '" font-size="15" font-weight="700">Relais chiffrés</text>' +
-      '<text x="480" y="' + (midY + 10) + '" text-anchor="middle" fill="' + cMuted + '" font-size="13">' + connRelays + " sur " + relays.length + " connectés</text>" +
+      '<text x="480" y="' + (midY - 12) + '" text-anchor="middle" fill="' + cText + '" font-size="15" font-weight="700">Liaison chiffrée</text>' +
+      '<text x="480" y="' + (midY + 10) + '" text-anchor="middle" fill="' + cMuted + '" font-size="13">' + connRelays + " sur " + relays.length + " relais actifs</text>" +
       '<text x="480" y="' + (midY + 29) + '" text-anchor="middle" fill="' + cMuted + '" font-size="13">Chiffrement privé E2E</text>' +
       "</g>";
 
@@ -412,7 +560,7 @@
       '<circle cx="58" cy="' + (midY - 15) + '" r="5.5" fill="' + localColor + '"/>' +
       '<text x="73" y="' + (midY - 10) + '" fill="' + cText + '" font-size="15" font-weight="700">' + escapeHTML((st.node_name || "Chez vous").slice(0, 20)) + "</text>" +
       '<text x="54" y="' + (midY + 12) + '" fill="' + cMuted + '" font-size="13">' + okProbes + " / " + probes.length + " services actifs</text>" +
-      '<text x="54" y="' + (midY + 31) + '" fill="' + cMuted + '" font-size="13">' + (st.muted ? "Connexion WAN coupée" : "Aucun port entrant") + "</text>" +
+      '<text x="54" y="' + (midY + 31) + '" fill="' + cMuted + '" font-size="13">' + (st.muted ? "Internet coupé" : "Aucun port ouvert") + "</text>" +
       "</g>";
 
     svg.innerHTML = out;
@@ -421,7 +569,7 @@
     });
   }
 
-  /* ---------------- DÉCOUVRIR : DOCKER & LAN ---------------- */
+  /* ---------------- APPAREILS : DOCKER & LAN ---------------- */
 
   async function loadDiscoverInfo() {
     try {
@@ -439,16 +587,16 @@
     const btn = $("scan-docker-btn");
     const meta = $("docker-scan-meta");
     btn.disabled = true;
-    meta.textContent = "Scan des conteneurs Docker en cours...";
+    meta.textContent = "Recherche des applications Docker en cours...";
     try {
       const { ok, data } = await apiFetch("/api/discover/docker", {
         method: "POST",
         body: JSON.stringify({ socket: state.dockerSocket })
       });
       if (!ok) {
-        meta.textContent = "Impossible de lire Docker : " + (data.error || "socket inaccessible");
+        meta.textContent = "Docker non détecté sur cette machine (" + (data.error || "socket inaccessible") + ").";
         $("docker-containers-list").innerHTML =
-          '<div class="editor-empty">Vérifiez que /var/run/docker.sock est monté avec les droits de lecture (group_add dans Docker Compose).</div>';
+          '<div class="editor-empty">Si vous utilisez Docker, montez /var/run/docker.sock dans votre Docker Compose pour cocher vos applications ici.</div>';
         return;
       }
       state.dockerScannedOnce = true;
@@ -459,14 +607,14 @@
       const runningCount = state.dockerContainers.filter((c) => c.running).length;
       meta.textContent =
         state.dockerContainers.length +
-        " conteneur(s) trouvé(s) sur cette machine (" +
+        " conteneur(s) trouvé(s) (" +
         runningCount +
         " actif(s), " +
         state.dockerSelected.size +
-        " sélectionné(s)).";
+        " surveillé(s)).";
       renderDockerContainers();
     } catch (err) {
-      meta.textContent = "Erreur lors du scan Docker : " + err.message;
+      meta.textContent = "Erreur lors de la lecture Docker : " + err.message;
     } finally {
       btn.disabled = false;
     }
@@ -480,7 +628,7 @@
     );
 
     if (!filtered.length) {
-      list.innerHTML = '<div class="editor-empty">Aucun conteneur ne correspond à votre recherche.</div>';
+      list.innerHTML = '<div class="editor-empty">Aucune application ne correspond à votre recherche.</div>';
       return;
     }
 
@@ -528,15 +676,14 @@
   }
 
   function updateApplyDockerButton() {
-    const count = state.dockerSelected.size;
-    $("apply-docker-btn").textContent = "Appliquer (" + count + ")";
+    $("apply-docker-btn").textContent = "Enregistrer (" + state.dockerSelected.size + ")";
   }
 
   async function applyDockerSelection() {
     const selected = Array.from(state.dockerSelected).sort();
     if (!state.config.probes) state.config.probes = [];
 
-    let idx = state.config.probes.findIndex((p) => p.kind === "docker");
+    const idx = state.config.probes.findIndex((p) => p.kind === "docker");
     if (selected.length === 0) {
       if (idx >= 0) state.config.probes.splice(idx, 1);
     } else if (idx >= 0) {
@@ -554,11 +701,12 @@
       });
     }
 
-    state.yamlEditedDirectly = false;
-    await saveConfiguration("Surveillance Docker mise à jour (" + selected.length + " conteneur(s)).");
-    state.dockerContainers.forEach((c) => {
-      c.monitored = state.dockerSelected.has(c.name);
-    });
+    const ok = await saveConfiguration("Surveillance Docker enregistrée (" + selected.length + " conteneur(s)).");
+    if (ok) {
+      state.dockerContainers.forEach((c) => {
+        c.monitored = state.dockerSelected.has(c.name);
+      });
+    }
   }
 
   async function runLANScan() {
@@ -666,20 +814,11 @@
         btn.textContent = "Ajout...";
 
         if (!state.config.probes) state.config.probes = [];
-        const probe = Object.assign({}, item.suggested_probe);
-        // Ensure unique probe ID
-        const existingIDs = new Set(state.config.probes.map((p) => p.id));
-        let candidate = probe.id || "service";
-        let n = 2;
-        while (existingIDs.has(candidate)) {
-          candidate = probe.id + "-" + n;
-          n++;
-        }
-        probe.id = candidate;
+        const probe = deepClone(item.suggested_probe);
+        probe.id = ensureUniqueProbeID(probe.id || slugifyID(item.name, "service"), -1);
 
         state.config.probes.push(probe);
-        state.yamlEditedDirectly = false;
-        const ok = await saveConfiguration(item.name + " a été ajouté à votre surveillance.");
+        const ok = await saveConfiguration(item.name + " est maintenant surveillé.");
         if (ok) {
           item.already_monitored = true;
           renderLANResults();
@@ -690,6 +829,732 @@
         }
       });
     });
+  }
+
+  /* ---------------- MES SERVICES & MODALE GUIDÉE ---------------- */
+
+  function renderManagedProbes() {
+    const probes = (state.config && state.config.probes) || [];
+    const subBtn = $("subtab-managed-btn");
+    if (subBtn) subBtn.textContent = "Mes services (" + probes.length + ")";
+
+    const list = $("managed-probes-list");
+    if (!probes.length) {
+      list.innerHTML =
+        '<div class="editor-empty">Aucun service configuré. Utilisez Conteneurs Docker, Scanner mon réseau ou Ajouter manuellement.</div>';
+      return;
+    }
+
+    const liveByID = {};
+    ((state.status && state.status.probes) || []).forEach((r) => {
+      liveByID[r.id] = r;
+    });
+
+    list.innerHTML = probes
+      .map((p, idx) => {
+        const live = liveByID[p.id];
+        let cls = "is-muted";
+        let stateLabel = "En attente";
+        let detail = describeProbeTarget(p);
+        if (live) {
+          cls = live.ok ? "is-ok" : "is-err";
+          stateLabel = live.ok ? "Fonctionne" : "En panne";
+          if (live.summary) detail += " · " + live.summary;
+        }
+        return (
+          '<div class="discover-row">' +
+          '<div class="discover-main">' +
+          '<div class="discover-title">' + escapeHTML(p.id) + ' <span class="mono-inline">' + escapeHTML(probeKindLabel(p.kind)) + "</span></div>" +
+          '<div class="discover-sub">' + escapeHTML(detail) + "</div>" +
+          "</div>" +
+          '<div class="discover-right">' +
+          '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + stateLabel + "</span>" +
+          '<button type="button" class="inline-action" data-edit-probe="' + idx + '">Modifier</button>' +
+          '<button type="button" class="inline-danger" data-delete-probe="' + idx + '">Supprimer</button>' +
+          "</div>" +
+          "</div>"
+        );
+      })
+      .join("");
+
+    list.querySelectorAll("[data-edit-probe]").forEach((btn) => {
+      btn.addEventListener("click", () => openProbeModal(Number(btn.dataset.editProbe)));
+    });
+    list.querySelectorAll("[data-delete-probe]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const idx = Number(btn.dataset.deleteProbe);
+        const target = state.config.probes[idx];
+        if (!target) return;
+        if (!confirm("Arrêter la surveillance de « " + target.id + " » ?")) return;
+        const removed = state.config.probes.splice(idx, 1)[0];
+        const ok = await saveConfiguration("« " + removed.id + " » a été retiré de la surveillance.");
+        if (!ok) {
+          state.config.probes.splice(idx, 0, removed);
+        }
+      });
+    });
+  }
+
+  function describeProbeTarget(p) {
+    switch (p.kind) {
+      case "http":
+      case "node_exporter":
+      case "windows_exporter":
+        return p.url || "";
+      case "synology":
+      case "snmp_oid":
+        return (p.host || "") + " (SNMP)";
+      case "tcp":
+        return (p.host || "") + ":" + (p.port || 22);
+      case "docker":
+        return p.containers && p.containers.length
+          ? p.containers.length + " conteneur(s) : " + p.containers.slice(0, 4).join(", ")
+          : "Socket Docker local";
+      default:
+        return "";
+    }
+  }
+
+  function defaultProbeForKind(kind, count) {
+    const base = { id: "", kind, interval: "1m", timeout: "10s" };
+    switch (kind) {
+      case "http":
+        return Object.assign(base, { id: "site-web-" + (count + 1), interval: "30s", url: "https://", expected_status: 200, tls_min_days: 14 });
+      case "tcp":
+        return Object.assign(base, { id: "appareil-" + (count + 1), interval: "30s", host: "192.168.1.1", port: 22 });
+      case "docker":
+        return Object.assign(base, { id: "docker-local", interval: "30s", socket: state.dockerSocket, containers: [] });
+      case "synology":
+        return Object.assign(base, { id: "nas-synology", host: "192.168.1.20", port: 161, snmp_version: "2c", community: "public", max_temp_c: 55 });
+      case "snmp_oid":
+        return Object.assign(base, { id: "capteur-snmp-" + (count + 1), host: "192.168.1.50", port: 161, snmp_version: "2c", community: "public", oid: ".1.3.6.1.2.1.1.3.0", expected_value: "1" });
+      case "node_exporter":
+        return Object.assign(base, { id: "serveur-linux", url: "http://192.168.1.10:9100/metrics", max_disk_percent: 90, max_ram_percent: 92 });
+      case "windows_exporter":
+        return Object.assign(base, { id: "serveur-windows", url: "http://192.168.1.15:9182/metrics", services: ["W32Time"], max_disk_percent: 90, max_ram_percent: 92 });
+      default:
+        return base;
+    }
+  }
+
+  function openProbeModal(editIndex) {
+    state.modalProbeIndex = editIndex;
+    $("probe-test-result").hidden = true;
+
+    if (editIndex >= 0 && state.config && state.config.probes[editIndex]) {
+      state.modalProbeDraft = deepClone(state.config.probes[editIndex]);
+      $("probe-modal-title").textContent = "Modifier « " + state.modalProbeDraft.id + " »";
+      $("probe-modal-subtitle").textContent = probeKindLabel(state.modalProbeDraft.kind);
+      $("probe-modal-picker").hidden = true;
+      $("probe-modal-form").hidden = false;
+      $("probe-modal-back").hidden = true;
+      renderProbeModalFields();
+    } else {
+      state.modalProbeDraft = null;
+      $("probe-modal-title").textContent = "Ajouter un appareil ou service";
+      $("probe-modal-subtitle").textContent = "Choisissez simplement ce que vous souhaitez surveiller.";
+      $("probe-modal-picker").hidden = false;
+      $("probe-modal-form").hidden = true;
+      $("probe-modal-back").hidden = false;
+    }
+    $("probe-modal").hidden = false;
+  }
+
+  function closeProbeModal() {
+    $("probe-modal").hidden = true;
+    state.modalProbeDraft = null;
+    state.modalProbeIndex = -1;
+  }
+
+  function pickProbeKindInModal(kind) {
+    if (kind === "docker") {
+      closeProbeModal();
+      switchTab("discover", "docker");
+      return;
+    }
+    const count = ((state.config && state.config.probes) || []).length;
+    state.modalProbeDraft = defaultProbeForKind(kind, count);
+    state.modalProbeDraft.id = ensureUniqueProbeID(state.modalProbeDraft.id, -1);
+    $("probe-modal-title").textContent = "Ajouter : " + probeKindLabel(kind);
+    $("probe-modal-subtitle").textContent = "Renseignez les informations essentielles puis testez la connexion en un clic.";
+    $("probe-modal-picker").hidden = true;
+    $("probe-modal-form").hidden = false;
+    $("probe-modal-back").hidden = false;
+    $("probe-test-result").hidden = true;
+    renderProbeModalFields();
+  }
+
+  function renderProbeModalFields() {
+    const p = state.modalProbeDraft;
+    if (!p) return;
+
+    let simpleHTML = "";
+    let advHTML = "";
+
+    switch (p.kind) {
+      case "http":
+        simpleHTML =
+          '<label class="field span-2"><span class="field-label">Adresse web (URL complète)</span>' +
+          '<input type="url" class="mono" data-mp="url" value="' + escapeHTML(p.url || "") + '" placeholder="https://jellyfin.exemple.fr ou http://192.168.1.10:8096" required></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Code HTTP attendu</span>' +
+          '<input type="number" data-mp="expected_status" data-type="int" value="' + escapeHTML(p.expected_status || 200) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte certificat HTTPS (jours restants)</span>' +
+          '<input type="number" data-mp="tls_min_days" data-type="intptr" value="' + escapeHTML(p.tls_min_days != null ? p.tls_min_days : 14) + '"></label>' +
+          '<label class="field"><span class="field-label">Texte attendu dans la page (optionnel)</span>' +
+          '<input type="text" data-mp="contains" value="' + escapeHTML(p.contains || "") + '"></label>' +
+          '<div class="field"><span class="field-label">Certificat local auto-signé</span>' +
+          '<label class="switch-control"><input type="checkbox" data-mp="insecure_skip_verify" data-type="bool"' + (p.insecure_skip_verify ? " checked" : "") + '><span class="switch-track"></span><span class="switch-text">Accepter</span></label></div>';
+        break;
+
+      case "synology": {
+        const isV3 = p.snmp_version === "3";
+        simpleHTML =
+          '<div class="help-callout">Sur votre NAS Synology : ouvrez <strong>Panneau de configuration → Terminal et SNMP → SNMP</strong>, cochez <strong>Activer le service SNMP</strong> puis <strong>SNMPv2c</strong> (communauté <code>public</code>).</div>' +
+          '<label class="field"><span class="field-label">Adresse IP du NAS</span>' +
+          '<input type="text" class="mono" data-mp="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.20" required></label>' +
+          '<label class="field"><span class="field-label">Température d\'alerte (°C)</span>' +
+          '<input type="number" data-mp="max_temp_c" data-type="int" value="' + escapeHTML(p.max_temp_c || 55) + '"></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Version SNMP</span>' +
+          '<select data-mp="snmp_version" data-rerender="1"><option value="2c"' + (!isV3 ? " selected" : "") + '>SNMPv2c (simple)</option><option value="3"' + (isV3 ? " selected" : "") + ">SNMPv3 (chiffré)</option></select></label>" +
+          '<label class="field"><span class="field-label">Port SNMP</span>' +
+          '<input type="number" data-mp="port" data-type="int" value="' + escapeHTML(p.port || 161) + '"></label>';
+        if (!isV3) {
+          advHTML +=
+            '<label class="field"><span class="field-label">Communauté SNMP</span>' +
+            '<input type="text" class="mono" data-mp="community" value="' + escapeHTML(p.community || "public") + '"></label>';
+        } else {
+          advHTML +=
+            '<label class="field"><span class="field-label">Utilisateur SNMPv3</span>' +
+            '<input type="text" class="mono" data-mp="user" value="' + escapeHTML(p.user || "") + '"></label>' +
+            '<label class="field"><span class="field-label">Protocole Auth</span>' +
+            '<select data-mp="auth_proto">' + ["NONE", "MD5", "SHA", "SHA256", "SHA512"].map((a) => '<option value="' + a + '"' + ((p.auth_proto || "SHA256").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>").join("") + "</select></label>" +
+            '<label class="field"><span class="field-label">Mot de passe Auth</span>' +
+            '<input type="password" class="mono" data-mp="auth_pass" value="' + escapeHTML(p.auth_pass || "") + '"></label>' +
+            '<label class="field"><span class="field-label">Protocole Priv</span>' +
+            '<select data-mp="priv_proto">' + ["NONE", "DES", "AES", "AES192", "AES256"].map((pr) => '<option value="' + pr + '"' + ((p.priv_proto || "AES").toUpperCase() === pr ? " selected" : "") + ">" + pr + "</option>").join("") + "</select></label>" +
+            '<label class="field"><span class="field-label">Mot de passe Priv</span>' +
+            '<input type="password" class="mono" data-mp="priv_pass" value="' + escapeHTML(p.priv_pass || "") + '"></label>';
+        }
+        break;
+      }
+
+      case "tcp": {
+        const presetMatch = TCP_PORT_PRESETS.some((pr) => pr.port === Number(p.port));
+        const presetOpts = TCP_PORT_PRESETS.map(
+          (pr) => '<option value="' + pr.port + '"' + (Number(p.port) === pr.port ? " selected" : "") + ">" + escapeHTML(pr.label) + "</option>"
+        ).join("");
+        simpleHTML =
+          '<label class="field"><span class="field-label">Adresse IP ou nom d\'hôte</span>' +
+          '<input type="text" class="mono" data-mp="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.1" required></label>' +
+          '<label class="field"><span class="field-label">Service / port à vérifier</span>' +
+          '<select id="mp-tcp-preset">' + presetOpts + '<option value="custom"' + (!presetMatch ? " selected" : "") + '>Autre port...</option></select></label>' +
+          '<label class="field" id="mp-tcp-port-wrap"' + (presetMatch ? " hidden" : "") + '><span class="field-label">Numéro de port</span>' +
+          '<input type="number" data-mp="port" data-type="int" value="' + escapeHTML(p.port || 22) + '"></label>';
+        break;
+      }
+
+      case "node_exporter":
+      case "windows_exporter": {
+        const defPort = p.kind === "node_exporter" ? 9100 : 9182;
+        const hostVal = extractHostFromExporterURL(p.url, defPort);
+        const toolName = p.kind === "node_exporter" ? "node_exporter (port 9100)" : "windows_exporter (port 9182)";
+        simpleHTML =
+          '<div class="help-callout">Indiquez simplement l\'adresse IP de votre serveur équipé de <strong>' + toolName + '</strong> (MeshWatch complète automatiquement l\'adresse des métriques).</div>' +
+          '<label class="field span-2"><span class="field-label">Adresse IP du serveur (ou URL complète)</span>' +
+          '<input type="text" class="mono" id="mp-exporter-host" value="' + escapeHTML(hostVal) + '" placeholder="' + (p.kind === "node_exporter" ? "192.168.1.10" : "192.168.1.15") + '" required></label>';
+        if (p.kind === "windows_exporter") {
+          simpleHTML +=
+            '<label class="field span-2"><span class="field-label">Services Windows essentiels (optionnel, séparés par des virgules)</span>' +
+            '<input type="text" class="mono" data-mp="services" data-type="csv" value="' + escapeHTML((p.services || []).join(", ")) + '" placeholder="W32Time, VeeamBackupSvc"></label>';
+        }
+        advHTML =
+          '<label class="field"><span class="field-label">Alerte espace disque plein (%)</span>' +
+          '<input type="number" step="any" data-mp="max_disk_percent" data-type="float" value="' + escapeHTML(p.max_disk_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte mémoire RAM (%)</span>' +
+          '<input type="number" step="any" data-mp="max_ram_percent" data-type="float" value="' + escapeHTML(p.max_ram_percent || 92) + '"></label>' +
+          '<label class="field span-2"><span class="field-label">Disques spécifiques à suivre (optionnel)</span>' +
+          '<input type="text" class="mono" data-mp="disks" data-type="csv" value="' + escapeHTML((p.disks || []).join(", ")) + '"></label>';
+        break;
+      }
+
+      case "docker":
+        simpleHTML =
+          '<div class="help-callout">Astuce : vous pouvez aussi cocher vos conteneurs visuellement dans l\'onglet <strong>Conteneurs Docker</strong>.</div>' +
+          '<label class="field span-2"><span class="field-label">Noms des conteneurs (séparés par des virgules)</span>' +
+          '<input type="text" class="mono" data-mp="containers" data-type="csv" value="' + escapeHTML((p.containers || []).join(", ")) + '" placeholder="jellyfin, immich_server, traefik"></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Socket Docker</span>' +
+          '<input type="text" class="mono" data-mp="socket" value="' + escapeHTML(p.socket || "/var/run/docker.sock") + '"></label>' +
+          '<label class="field"><span class="field-label">Redémarrages max. tolérés</span>' +
+          '<input type="number" data-mp="max_restarts" data-type="int" value="' + escapeHTML(p.max_restarts || 0) + '"></label>';
+        break;
+
+      case "snmp_oid":
+        simpleHTML =
+          '<label class="field"><span class="field-label">Adresse IP de l\'appareil</span>' +
+          '<input type="text" class="mono" data-mp="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.50" required></label>' +
+          '<label class="field"><span class="field-label">OID SNMP</span>' +
+          '<input type="text" class="mono" data-mp="oid" value="' + escapeHTML(p.oid || "") + '" required></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Communauté SNMPv2c</span>' +
+          '<input type="text" class="mono" data-mp="community" value="' + escapeHTML(p.community || "public") + '"></label>' +
+          '<label class="field"><span class="field-label">Valeur attendue</span>' +
+          '<input type="text" class="mono" data-mp="expected_value" value="' + escapeHTML(p.expected_value || "") + '"></label>' +
+          '<label class="field"><span class="field-label">Seuil minimum</span>' +
+          '<input type="number" step="any" data-mp="min_value" data-type="floatptr" value="' + escapeHTML(p.min_value != null ? p.min_value : "") + '"></label>' +
+          '<label class="field"><span class="field-label">Seuil maximum</span>' +
+          '<input type="number" step="any" data-mp="max_value" data-type="floatptr" value="' + escapeHTML(p.max_value != null ? p.max_value : "") + '"></label>';
+        break;
+    }
+
+    const container = $("probe-modal-fields");
+    container.innerHTML =
+      '<div class="form-grid two-col">' +
+      '<label class="field span-2"><span class="field-label">Nom affiché pour ce service</span>' +
+      '<input type="text" data-mp="id" value="' + escapeHTML(p.id || "") + '" placeholder="Ex. NAS Salon, Jellyfin..." required></label>' +
+      simpleHTML +
+      "</div>" +
+      '<details class="advanced-fold"><summary>Options avancées (fréquence, seuils)</summary>' +
+      '<div class="form-grid two-col fold-body">' +
+      '<label class="field"><span class="field-label">Fréquence de vérification</span>' +
+      '<select id="mp-interval-select" data-mp="interval">' +
+      '<option value="30s">Toutes les 30 secondes</option>' +
+      '<option value="1m">Toutes les minutes</option>' +
+      '<option value="2m">Toutes les 2 minutes</option>' +
+      '<option value="5m">Toutes les 5 minutes</option>' +
+      "</select></label>" +
+      '<label class="field"><span class="field-label">Délai max de réponse</span>' +
+      '<select id="mp-timeout-select" data-mp="timeout">' +
+      '<option value="5s">5 secondes</option>' +
+      '<option value="10s">10 secondes (recommandé)</option>' +
+      '<option value="20s">20 secondes</option>' +
+      "</select></label>" +
+      advHTML +
+      "</div></details>";
+
+    normalizeDurationSelect($("mp-interval-select"), p.interval || "1m");
+    normalizeDurationSelect($("mp-timeout-select"), p.timeout || "10s");
+
+    const expHost = $("mp-exporter-host");
+    if (expHost) {
+      const defPort = p.kind === "node_exporter" ? 9100 : 9182;
+      expHost.addEventListener("input", () => {
+        state.modalProbeDraft.url = buildExporterURL(expHost.value, defPort);
+      });
+    }
+
+    const tcpPreset = $("mp-tcp-preset");
+    if (tcpPreset) {
+      tcpPreset.addEventListener("change", () => {
+        const wrap = $("mp-tcp-port-wrap");
+        if (tcpPreset.value === "custom") {
+          wrap.hidden = false;
+        } else {
+          wrap.hidden = true;
+          state.modalProbeDraft.port = Number(tcpPreset.value);
+          const portInput = container.querySelector('[data-mp="port"]');
+          if (portInput) portInput.value = tcpPreset.value;
+        }
+      });
+    }
+
+    container.querySelectorAll("[data-mp]").forEach((el) => {
+      const evt = el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input";
+      el.addEventListener(evt, () => {
+        const field = el.dataset.mp;
+        const type = el.dataset.type || "string";
+        if (type === "bool") state.modalProbeDraft[field] = el.checked;
+        else if (type === "int") state.modalProbeDraft[field] = el.value === "" ? 0 : parseInt(el.value, 10) || 0;
+        else if (type === "intptr") state.modalProbeDraft[field] = el.value === "" ? null : parseInt(el.value, 10);
+        else if (type === "float") state.modalProbeDraft[field] = el.value === "" ? 0 : parseFloat(el.value) || 0;
+        else if (type === "floatptr") state.modalProbeDraft[field] = el.value === "" ? null : parseFloat(el.value);
+        else if (type === "csv") state.modalProbeDraft[field] = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+        else state.modalProbeDraft[field] = el.value;
+
+        if (el.dataset.rerender === "1") renderProbeModalFields();
+      });
+    });
+  }
+
+  function syncProbeDraftFromModal() {
+    const p = state.modalProbeDraft;
+    if (!p) return null;
+    const expHost = $("mp-exporter-host");
+    if (expHost) {
+      const defPort = p.kind === "node_exporter" ? 9100 : 9182;
+      p.url = buildExporterURL(expHost.value, defPort);
+    }
+    p.id = String(p.id || "").trim() || ensureUniqueProbeID(slugifyID(p.kind, "service"), state.modalProbeIndex);
+    return p;
+  }
+
+  async function runModalProbeTest() {
+    const p = syncProbeDraftFromModal();
+    if (!p) return;
+    const btn = $("probe-modal-test");
+    const box = $("probe-test-result");
+    btn.disabled = true;
+    btn.textContent = "Test en cours...";
+    box.hidden = true;
+
+    try {
+      const { ok, data } = await apiFetch("/api/probes/test", {
+        method: "POST",
+        body: JSON.stringify({ probe: p })
+      });
+      box.hidden = false;
+      box.className = "test-banner";
+      if (!ok) {
+        box.classList.add("is-err");
+        box.textContent = "Vérifiez les paramètres : " + humanizeError(data.error || "configuration invalide");
+        return;
+      }
+      if (data.ok) {
+        box.classList.add("is-ok");
+        box.textContent = "Connexion réussie (" + (data.latency_ms || 0) + " ms) · " + (data.summary || "OK");
+      } else {
+        box.classList.add("is-err");
+        box.textContent = "Échec du test : " + humanizeError(data.summary || "service injoignable");
+      }
+    } catch (err) {
+      box.hidden = false;
+      box.className = "test-banner is-err";
+      box.textContent = "Erreur : " + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Tester la connexion";
+    }
+  }
+
+  async function submitProbeModal(e) {
+    e.preventDefault();
+    const p = syncProbeDraftFromModal();
+    if (!p) return;
+
+    if (!state.config.probes) state.config.probes = [];
+    const prevProbes = deepClone(state.config.probes);
+
+    if (state.modalProbeIndex >= 0) {
+      state.config.probes[state.modalProbeIndex] = p;
+    } else {
+      p.id = ensureUniqueProbeID(p.id, -1);
+      state.config.probes.push(p);
+    }
+
+    const saveBtn = $("probe-modal-save");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Enregistrement...";
+    const ok = await saveConfiguration("« " + p.id + " » a été enregistré.");
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Enregistrer";
+
+    if (ok) {
+      closeProbeModal();
+      renderManagedProbes();
+    } else {
+      state.config.probes = prevProbes;
+    }
+  }
+
+  /* ---------------- MES AMIS : INVITATION 1 CLIC ---------------- */
+
+  function encodeInviteCode(payload) {
+    const json = JSON.stringify(payload);
+    const bytes = new TextEncoder().encode(json);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return "MW1-" + btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function decodeInviteCode(raw) {
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) return null;
+    if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+      return { name: "", pubkey: trimmed.toLowerCase(), psk: "" };
+    }
+    if (!trimmed.startsWith("MW1-")) return null;
+    try {
+      let b64 = trimmed.slice(4).replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const obj = JSON.parse(new TextDecoder().decode(bytes));
+      if (!obj || !/^[0-9a-fA-F]{64}$/.test(obj.pubkey || "")) return null;
+      return {
+        name: String(obj.name || "").trim(),
+        pubkey: obj.pubkey.toLowerCase(),
+        psk: /^[0-9a-fA-F]{64}$/.test(obj.psk || "") ? obj.psk.toLowerCase() : ""
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function updateInviteCodeDisplay() {
+    const input = $("my-invite-code");
+    if (!input || !state.config) return;
+    const pub = (state.status && state.status.pubkey_hex) || (state.config.node && state.config.node.pubkey_hex) || "";
+    if (!pub) {
+      input.value = "";
+      return;
+    }
+    const payload = {
+      name: (state.config.node && state.config.node.name) || "Mon Homelab",
+      pubkey: pub
+    };
+    if ($("invite-include-group").checked && state.config.node && state.config.node.group_psk_hex) {
+      payload.psk = state.config.node.group_psk_hex;
+    }
+    input.value = encodeInviteCode(payload);
+  }
+
+  function handleInviteInput() {
+    const raw = $("friend-invite-input").value;
+    const parsed = decodeInviteCode(raw);
+    state.parsedInvite = parsed;
+    const preview = $("friend-invite-preview");
+    const addBtn = $("add-friend-from-invite-btn");
+
+    if (!parsed) {
+      preview.hidden = true;
+      addBtn.disabled = true;
+      return;
+    }
+
+    preview.hidden = false;
+    addBtn.disabled = false;
+    $("friend-invite-name").textContent = parsed.name
+      ? "Invitation reconnue : " + parsed.name
+      : "Clé publique reconnue (" + parsed.pubkey.slice(0, 12) + "...)";
+
+    const currentPSK = (state.config && state.config.node && state.config.node.group_psk_hex) || "";
+    const hasDifferentPSK = Boolean(parsed.psk && parsed.psk !== currentPSK.toLowerCase());
+    const wrap = $("friend-join-group-wrap");
+    const cb = $("friend-join-group");
+    const label = $("friend-join-group-label");
+
+    if (hasDifferentPSK) {
+      wrap.hidden = false;
+      const existingPeers = ((state.config && state.config.peers) || []).length;
+      cb.checked = existingPeers === 0;
+      label.textContent = existingPeers === 0
+        ? "Rejoindre automatiquement son groupe privé chiffré (recommandé)"
+        : "Remplacer mon groupe actuel par le sien (attention : vos autres amis devront utiliser le même)";
+    } else {
+      wrap.hidden = true;
+      cb.checked = false;
+    }
+  }
+
+  async function addFriendFromInvite() {
+    const parsed = state.parsedInvite;
+    if (!parsed || !state.config) return;
+
+    const myPub = ((state.status && state.status.pubkey_hex) || (state.config.node && state.config.node.pubkey_hex) || "").toLowerCase();
+    if (myPub && parsed.pubkey === myPub) {
+      showToast("warn", "C'est votre propre code d'invitation ! Collez celui envoyé par votre ami.");
+      return;
+    }
+
+    if (!state.config.peers) state.config.peers = [];
+    if (state.config.peers.some((p) => (p.pubkey_hex || "").toLowerCase() === parsed.pubkey)) {
+      showToast("warn", "Cet ami est déjà dans votre liste.");
+      return;
+    }
+
+    const prevConfig = deepClone(state.config);
+    const name = parsed.name || "Ami " + (state.config.peers.length + 1);
+    state.config.peers.push({ name, pubkey_hex: parsed.pubkey, kuma_push_url: "" });
+
+    if (parsed.psk && $("friend-join-group").checked) {
+      state.config.node.group_psk_hex = parsed.psk;
+      $("cfg-psk").value = parsed.psk;
+    }
+
+    const ok = await saveConfiguration(name + " a été ajouté à vos amis.");
+    if (ok) {
+      $("friend-invite-input").value = "";
+      state.parsedInvite = null;
+      $("friend-invite-preview").hidden = true;
+      $("add-friend-from-invite-btn").disabled = true;
+      updateInviteCodeDisplay();
+      renderPeersList();
+    } else {
+      state.config = prevConfig;
+    }
+  }
+
+  function renderPeersList() {
+    const peers = (state.config && state.config.peers) || [];
+    $("peers-count-label").textContent = peers.length + (peers.length > 1 ? " amis" : " ami");
+    const container = $("peers-list");
+
+    if (!peers.length) {
+      container.innerHTML =
+        '<div class="editor-empty">Aucun ami ajouté pour le moment. Partagez votre code d\'invitation ci-dessus ou collez celui d\'un proche.</div>';
+      return;
+    }
+
+    const liveByPub = {};
+    ((state.status && state.status.peers) || []).forEach((lp) => {
+      liveByPub[(lp.pubkey_hex || "").toLowerCase()] = lp;
+    });
+
+    container.innerHTML = peers
+      .map((p, idx) => {
+        const live = liveByPub[(p.pubkey_hex || "").toLowerCase()];
+        let cls = "is-muted";
+        let stateLabel = "En attente de connexion";
+        if (live) {
+          if (live.timed_out) {
+            cls = "is-err";
+            stateLabel = "Hors ligne";
+          } else if (live.online && !live.overall_ok) {
+            cls = "is-warn";
+            stateLabel = "Service en alerte";
+          } else if (live.online) {
+            cls = "is-ok";
+            stateLabel = "En ligne";
+          }
+        }
+        const sub = (p.pubkey_hex || "").slice(0, 14) + "..." + (p.kuma_push_url ? " · Synchronisé avec Uptime Kuma" : "");
+        return (
+          '<div class="discover-row">' +
+          '<div class="discover-main">' +
+          '<div class="discover-title">' + escapeHTML(p.name || "Ami sans nom") + "</div>" +
+          '<div class="discover-sub">' + escapeHTML(sub) + "</div>" +
+          "</div>" +
+          '<div class="discover-right">' +
+          '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + stateLabel + "</span>" +
+          '<button type="button" class="inline-action" data-edit-peer="' + idx + '">Modifier</button>' +
+          '<button type="button" class="inline-danger" data-remove-peer="' + idx + '">Retirer</button>' +
+          "</div>" +
+          "</div>"
+        );
+      })
+      .join("");
+
+    container.querySelectorAll("[data-edit-peer]").forEach((btn) => {
+      btn.addEventListener("click", () => openFriendModal(Number(btn.dataset.editPeer)));
+    });
+    container.querySelectorAll("[data-remove-peer]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const idx = Number(btn.dataset.removePeer);
+        const peer = state.config.peers[idx];
+        if (!peer) return;
+        if (!confirm("Retirer « " + peer.name + " » de vos amis ?")) return;
+        const removed = state.config.peers.splice(idx, 1)[0];
+        const ok = await saveConfiguration(removed.name + " a été retiré de vos amis.");
+        if (!ok) state.config.peers.splice(idx, 0, removed);
+        renderPeersList();
+      });
+    });
+  }
+
+  function openFriendModal(idx) {
+    state.modalFriendIndex = idx;
+    if (idx >= 0 && state.config.peers[idx]) {
+      const p = state.config.peers[idx];
+      $("friend-modal-title").textContent = "Modifier " + (p.name || "cet ami");
+      $("fm-name").value = p.name || "";
+      $("fm-pubkey").value = p.pubkey_hex || "";
+      $("fm-kuma").value = p.kuma_push_url || "";
+    } else {
+      $("friend-modal-title").textContent = "Ajouter un ami manuellement";
+      $("fm-name").value = "";
+      $("fm-pubkey").value = "";
+      $("fm-kuma").value = "";
+    }
+    $("friend-modal").hidden = false;
+    $("fm-name").focus();
+  }
+
+  function closeFriendModal() {
+    $("friend-modal").hidden = true;
+    state.modalFriendIndex = -1;
+  }
+
+  async function submitFriendModal(e) {
+    e.preventDefault();
+    const entry = {
+      name: $("fm-name").value.trim(),
+      pubkey_hex: $("fm-pubkey").value.trim().toLowerCase(),
+      kuma_push_url: $("fm-kuma").value.trim()
+    };
+    if (!state.config.peers) state.config.peers = [];
+    const prevPeers = deepClone(state.config.peers);
+    if (state.modalFriendIndex >= 0) {
+      state.config.peers[state.modalFriendIndex] = entry;
+    } else {
+      state.config.peers.push(entry);
+    }
+
+    const ok = await saveConfiguration(entry.name + " a été enregistré.");
+    if (ok) {
+      closeFriendModal();
+      renderPeersList();
+    } else {
+      state.config.peers = prevPeers;
+    }
+  }
+
+  /* ---------------- ALERTES ---------------- */
+
+  function generateRandomNtfyChannel() {
+    const bytes = new Uint8Array(6);
+    crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const topic = "meshwatch-" + hex.slice(0, 6) + "-" + hex.slice(6);
+    $("cfg-ntfy-url").value = "https://ntfy.sh/" + topic;
+    $("cfg-ntfy-topic").value = "";
+    $("cfg-ntfy-enabled").checked = true;
+    $("ntfy-topic-hint").textContent = "Abonnez-vous au canal « " + topic + " » dans l'application ntfy sur votre téléphone.";
+    setDirty(true);
+    showToast("ok", "Canal privé créé : « " + topic + " ». Cliquez sur Enregistrer puis Testez.");
+  }
+
+  async function runTestNotify() {
+    readGeneralFieldsIntoConfig();
+    const btn = $("test-notify-btn");
+    const out = $("test-notify-output");
+    btn.disabled = true;
+    btn.textContent = "Envoi en cours...";
+    try {
+      const { ok, data } = await apiFetch("/api/test-notify", {
+        method: "POST",
+        body: JSON.stringify({
+          node_name: state.config.node.name,
+          notifications: state.config.notifications
+        })
+      });
+      if (!ok) {
+        showToast("err", data.error || "Activez au moins ntfy ou Photon avant de tester.");
+        out.hidden = true;
+        return;
+      }
+      out.innerHTML = (data.results || [])
+        .map((r) => {
+          const cls = r.ok ? "is-ok" : "is-err";
+          const label = r.ok ? "Envoyé (" + r.latency_ms + " ms)" : "Échec : " + humanizeError(r.error);
+          return (
+            '<div class="test-output-line">' +
+            '<span class="cell-primary">' + escapeHTML(r.channel === "ntfy" ? "Téléphone (ntfy)" : "iMessage (Photon)") + "</span>" +
+            '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + escapeHTML(label) + "</span>" +
+            "</div>"
+          );
+        })
+        .join("");
+      out.hidden = false;
+      showToast(data.ok ? "ok" : "warn", data.ok ? "Alerte de test envoyée sur votre téléphone." : "Certains canaux ont échoué.");
+    } catch (err) {
+      showToast("err", err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Envoyer une alerte de test";
+    }
   }
 
   /* ---------------- UPDATES ---------------- */
@@ -714,7 +1579,7 @@
     } finally {
       if (btn && force) {
         btn.disabled = false;
-        btn.textContent = "Vérifier les mises à jour";
+        btn.textContent = "Vérifier";
       }
     }
   }
@@ -735,8 +1600,8 @@
 
       $("settings-update-headline").textContent = "Version " + info.latest_version + " disponible";
       $("settings-update-detail").textContent = info.can_auto_update
-        ? "Cliquez sur Mettre à jour maintenant pour télécharger l'image " + info.image + " et redémarrer automatiquement."
-        : "Mise à jour manuelle requise : docker compose pull && docker compose up -d";
+        ? "Cliquez sur Mettre à jour maintenant pour installer automatiquement la nouvelle version."
+        : "Mise à jour manuelle disponible sur GitHub.";
       settingsBtn.hidden = false;
       settingsBtn.textContent = info.can_auto_update ? "Mettre à jour maintenant" : "Ouvrir sur GitHub";
     } else {
@@ -753,17 +1618,17 @@
     if (!info) return;
     if (!info.can_auto_update) {
       if (info.release_url) window.open(info.release_url, "_blank", "noopener");
-      showFeedback("warn", "Exécutez sur l'hôte : docker compose pull && docker compose up -d");
+      showToast("warn", "Ouvrez GitHub ou lancez docker compose pull && docker compose up -d.");
       return;
     }
 
-    if (!confirm("Télécharger " + info.latest_version + " et redémarrer MeshWatch maintenant ?")) {
+    if (!confirm("Installer la version " + info.latest_version + " et redémarrer MeshWatch maintenant ?")) {
       return;
     }
 
     $("updating-overlay").hidden = false;
     $("updating-message").textContent =
-      "Téléchargement de " + info.image + " et redémarrage automatique du conteneur. Ne fermez pas cet onglet...";
+      "Téléchargement de la nouvelle version et redémarrage automatique. Ne fermez pas cette page...";
 
     try {
       const { ok, data } = await apiFetch("/api/update/apply", {
@@ -772,17 +1637,16 @@
       });
       if (!ok) {
         $("updating-overlay").hidden = true;
-        showFeedback("err", "Mise à jour échouée : " + (data.error || "erreur Docker"));
+        showToast("err", "Mise à jour impossible : " + (data.error || "vérifiez l'accès au socket Docker"));
         return;
       }
 
-      // Poll until the restarted updated container comes back online.
       const prevVersion = info.current_version + ":" + info.current_commit;
       const started = Date.now();
       const pollReconnect = async () => {
         if (Date.now() - started > 120000) {
           $("updating-overlay").hidden = true;
-          showFeedback("warn", "Le redémarrage prend plus de temps que prévu. Actualisez la page.");
+          showToast("warn", "Le redémarrage prend un peu plus de temps. Actualisez la page.");
           return;
         }
         try {
@@ -800,19 +1664,19 @@
       setTimeout(pollReconnect, 2500);
     } catch (err) {
       $("updating-overlay").hidden = true;
-      showFeedback("err", "Erreur de mise à jour : " + err.message);
+      showToast("err", "Erreur de mise à jour : " + err.message);
     }
   }
 
-  /* ---------------- CONFIG FORMS ---------------- */
+  /* ---------------- CONFIG FORMS & BACKUP ---------------- */
 
   function populateFormsFromConfig() {
     const cfg = state.config;
     if (!cfg) return;
 
     $("cfg-node-name").value = cfg.node.name || "";
-    $("cfg-hb-interval").value = cfg.node.heartbeat_interval || "30s";
-    $("cfg-peer-timeout").value = cfg.node.peer_timeout || "90s";
+    normalizeDurationSelect($("cfg-hb-interval"), cfg.node.heartbeat_interval || "30s");
+    normalizeDurationSelect($("cfg-peer-timeout"), cfg.node.peer_timeout || "1m30s");
     $("cfg-privkey").value = cfg.node.private_key_hex || "";
     $("cfg-psk").value = cfg.node.group_psk_hex || "";
     if (cfg.node.pubkey_hex) $("id-pubkey").value = cfg.node.pubkey_hex;
@@ -837,22 +1701,31 @@
     $("cfg-photon-rec-field").value = photon.recipient_field || "recipient";
     $("cfg-photon-msg-field").value = photon.message_field || "message";
 
-    if (state.configPath) {
-      $("yaml-path-hint").textContent =
-        "Fichier : " + state.configPath + (state.writable ? " (sauvegarde directe active)" : " (lecture seule)");
+    const storageBadge = $("settings-storage-status");
+    const storageDesc = $("settings-storage-desc");
+    if (state.writable) {
+      storageBadge.className = "status-cell is-ok";
+      storageBadge.innerHTML = '<span class="status-dot is-ok"></span>Enregistrement automatique actif';
+      storageDesc.textContent =
+        "Toutes vos modifications sont enregistrées automatiquement sur votre serveur. Vous pouvez aussi exporter une copie de secours ou restaurer une sauvegarde en un clic.";
+    } else {
+      storageBadge.className = "status-cell is-warn";
+      storageBadge.innerHTML = '<span class="status-dot is-warn"></span>Stockage en lecture seule';
+      storageDesc.textContent =
+        "Le volume de configuration Docker est monté en lecture seule (:ro). Retirez :ro sur config.yaml dans docker-compose.yml pour rendre vos modifications permanentes après redémarrage.";
     }
 
-    renderPeersEditor();
-    renderProbesWorkspace();
-    $("yaml-editor").value = state.rawYAML || "";
+    updateInviteCodeDisplay();
+    renderPeersList();
+    renderManagedProbes();
   }
 
   function readGeneralFieldsIntoConfig() {
     const cfg = state.config;
     if (!cfg) return;
-    cfg.node.name = $("cfg-node-name").value.trim();
-    cfg.node.heartbeat_interval = $("cfg-hb-interval").value.trim() || "30s";
-    cfg.node.peer_timeout = $("cfg-peer-timeout").value.trim() || "90s";
+    cfg.node.name = $("cfg-node-name").value.trim() || "mon-homelab";
+    cfg.node.heartbeat_interval = $("cfg-hb-interval").value || "30s";
+    cfg.node.peer_timeout = $("cfg-peer-timeout").value || "1m30s";
     cfg.node.private_key_hex = $("cfg-privkey").value.trim();
     cfg.node.group_psk_hex = $("cfg-psk").value.trim();
 
@@ -885,445 +1758,170 @@
     };
   }
 
-  /* ---------------- AMIS ---------------- */
-
-  function renderPeersEditor() {
-    const peers = (state.config && state.config.peers) || [];
-    $("peers-count-label").textContent = peers.length + (peers.length > 1 ? " amis" : " ami");
-    const container = $("peers-list");
-
-    if (!peers.length) {
-      container.innerHTML =
-        '<div class="editor-empty">Vous n\'avez pas encore ajouté d\'ami. Cliquez sur Ajouter un ami pour coller son code d\'invitation.</div>';
-      return;
-    }
-
-    container.innerHTML = peers
-      .map(
-        (p, idx) =>
-          '<div class="peer-row" data-peer-idx="' + idx + '">' +
-          '<label class="field"><span class="field-label">Prénom ou surnom</span>' +
-          '<input type="text" data-peer-field="name" value="' + escapeHTML(p.name || "") + '" placeholder="Homelab Nord"></label>' +
-          '<label class="field"><span class="field-label">Code ami (clé publique)</span>' +
-          '<input type="text" class="mono" data-peer-field="pubkey_hex" value="' + escapeHTML(p.pubkey_hex || "") + '" placeholder="Collez son code ami"></label>' +
-          '<label class="field"><span class="field-label">Lien Push Uptime Kuma (optionnel)</span>' +
-          '<input type="url" class="mono" data-peer-field="kuma_push_url" value="' + escapeHTML(p.kuma_push_url || "") + '" placeholder="http://uptime-kuma:3001/api/push/..."></label>' +
-          '<button type="button" class="inline-danger" data-remove-peer="' + idx + '">Retirer</button>' +
-          "</div>"
-      )
-      .join("");
-
-    container.querySelectorAll("[data-peer-field]").forEach((input) => {
-      input.addEventListener("input", () => {
-        const idx = Number(input.closest("[data-peer-idx]").dataset.peerIdx);
-        state.config.peers[idx][input.dataset.peerField] = input.value;
-        state.yamlEditedDirectly = false;
-        setDirty(true);
-      });
-    });
-
-    container.querySelectorAll("[data-remove-peer]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.config.peers.splice(Number(btn.dataset.removePeer), 1);
-        state.yamlEditedDirectly = false;
-        setDirty(true);
-        renderPeersEditor();
-      });
-    });
-  }
-
-  /* ---------------- SONDES MANUELLES SIMPLIFIÉES ---------------- */
-
-  function defaultProbeForKind(kind, count) {
-    const base = { id: kind.replace("_", "-") + "-" + (count + 1), kind, interval: "60s", timeout: "10s" };
-    switch (kind) {
-      case "http":
-        return Object.assign(base, { interval: "30s", url: "https://", expected_status: 200, tls_min_days: 14 });
-      case "tcp":
-        return Object.assign(base, { interval: "30s", host: "192.168.1.10", port: 22 });
-      case "docker":
-        return Object.assign(base, { interval: "30s", socket: state.dockerSocket, containers: [] });
-      case "synology":
-        return Object.assign(base, { host: "192.168.1.20", port: 161, snmp_version: "2c", community: "public", max_temp_c: 55 });
-      case "snmp_oid":
-        return Object.assign(base, { host: "192.168.1.50", port: 161, snmp_version: "2c", community: "public", oid: ".1.3.6.1.2.1.1.3.0", expected_value: "1" });
-      case "node_exporter":
-        return Object.assign(base, { url: "http://192.168.1.10:9100/metrics", max_disk_percent: 90, max_ram_percent: 92 });
-      case "windows_exporter":
-        return Object.assign(base, { url: "http://192.168.1.15:9182/metrics", services: ["W32Time"], max_disk_percent: 90, max_ram_percent: 92 });
-      default:
-        return base;
-    }
-  }
-
-  function renderProbesWorkspace() {
-    const probes = (state.config && state.config.probes) || [];
-    if (state.selectedProbeIndex >= probes.length) {
-      state.selectedProbeIndex = Math.max(0, probes.length - 1);
-    }
-
-    const listEl = $("probe-list");
-    const editorEl = $("probe-editor");
-
-    if (!probes.length) {
-      listEl.innerHTML = '<div class="editor-empty">Aucun service configuré.</div>';
-      editorEl.innerHTML =
-        '<div class="editor-empty">Utilisez Docker local ou Réseau local pour ajouter des appareils en un clic, ou choisissez un type ci-dessus.</div>';
-      return;
-    }
-
-    listEl.innerHTML = probes
-      .map((p, idx) => {
-        const sel = idx === state.selectedProbeIndex ? " is-selected" : "";
-        return (
-          '<button type="button" class="probe-list-item' + sel + '" data-select-probe="' + idx + '">' +
-          '<span class="probe-item-id">' + escapeHTML(p.id || "Service sans nom") + "</span>" +
-          '<span class="probe-item-meta">' + escapeHTML(probeKindLabel(p.kind)) + " · " + escapeHTML(p.interval || "60s") + "</span>" +
-          "</button>"
-        );
-      })
-      .join("");
-
-    listEl.querySelectorAll("[data-select-probe]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.selectedProbeIndex = Number(btn.dataset.selectProbe);
-        renderProbesWorkspace();
-      });
-    });
-
-    editorEl.innerHTML = buildProbeFormHTML(probes[state.selectedProbeIndex]);
-    bindProbeFormEvents(state.selectedProbeIndex);
-  }
-
-  function buildProbeFormHTML(p) {
-    const kindOptions = PROBE_KINDS.map(
-      (k) => '<option value="' + k.value + '"' + (p.kind === k.value ? " selected" : "") + ">" + escapeHTML(k.label) + "</option>"
-    ).join("");
-
-    let simpleFields = "";
-    let advancedFields = "";
-
-    switch (p.kind) {
-      case "http":
-        simpleFields =
-          '<label class="field span-2"><span class="field-label">Adresse web (URL)</span>' +
-          '<input type="url" class="mono" data-pf="url" value="' + escapeHTML(p.url || "") + '" placeholder="https://mon-service.fr"></label>';
-        advancedFields =
-          '<label class="field"><span class="field-label">Code HTTP attendu</span>' +
-          '<input type="number" data-pf="expected_status" data-type="int" value="' + escapeHTML(p.expected_status || 200) + '"></label>' +
-          '<label class="field"><span class="field-label">Alerte certificat TLS (jours min.)</span>' +
-          '<input type="number" data-pf="tls_min_days" data-type="intptr" value="' + escapeHTML(p.tls_min_days != null ? p.tls_min_days : 14) + '"></label>' +
-          '<label class="field"><span class="field-label">Mot-clé attendu dans la page</span>' +
-          '<input type="text" data-pf="contains" value="' + escapeHTML(p.contains || "") + '" placeholder="Optionnel"></label>' +
-          '<div class="field"><span class="field-label">Certificat auto-signé local</span>' +
-          '<label class="switch-control"><input type="checkbox" data-pf="insecure_skip_verify" data-type="bool"' + (p.insecure_skip_verify ? " checked" : "") + '><span class="switch-track"></span><span class="switch-text">Accepter auto-signé</span></label></div>';
-        break;
-
-      case "tcp":
-        simpleFields =
-          '<label class="field"><span class="field-label">Adresse IP ou nom</span>' +
-          '<input type="text" class="mono" data-pf="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.10"></label>' +
-          '<label class="field"><span class="field-label">Port</span>' +
-          '<input type="number" data-pf="port" data-type="int" value="' + escapeHTML(p.port || 22) + '"></label>';
-        break;
-
-      case "docker":
-        simpleFields =
-          '<label class="field span-2"><span class="field-label">Conteneurs surveillés (virgules)</span>' +
-          '<input type="text" class="mono" data-pf="containers" data-type="csv" value="' + escapeHTML((p.containers || []).join(", ")) + '" placeholder="jellyfin, traefik, immich_server"></label>';
-        advancedFields =
-          '<label class="field"><span class="field-label">Socket Docker</span>' +
-          '<input type="text" class="mono" data-pf="socket" value="' + escapeHTML(p.socket || "/var/run/docker.sock") + '"></label>' +
-          '<label class="field"><span class="field-label">Filtre label (si liste vide)</span>' +
-          '<input type="text" class="mono" data-pf="label" value="' + escapeHTML(p.label || "") + '"></label>' +
-          '<label class="field"><span class="field-label">Redémarrages max.</span>' +
-          '<input type="number" data-pf="max_restarts" data-type="int" value="' + escapeHTML(p.max_restarts || 0) + '"></label>';
-        break;
-
-      case "synology":
-      case "snmp_oid": {
-        const isV3 = p.snmp_version === "3";
-        simpleFields =
-          '<label class="field"><span class="field-label">Adresse IP du NAS / appareil</span>' +
-          '<input type="text" class="mono" data-pf="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.20"></label>';
-        if (p.kind === "synology") {
-          simpleFields +=
-            '<label class="field"><span class="field-label">Température max. (°C)</span>' +
-            '<input type="number" data-pf="max_temp_c" data-type="int" value="' + escapeHTML(p.max_temp_c || 55) + '"></label>';
-        } else {
-          simpleFields +=
-            '<label class="field"><span class="field-label">OID SNMP</span>' +
-            '<input type="text" class="mono" data-pf="oid" value="' + escapeHTML(p.oid || "") + '"></label>';
-        }
-        advancedFields =
-          '<label class="field"><span class="field-label">Version SNMP</span>' +
-          '<select data-pf="snmp_version" data-rerender="1"><option value="2c"' + (!isV3 ? " selected" : "") + '>SNMPv2c</option><option value="3"' + (isV3 ? " selected" : "") + ">SNMPv3</option></select></label>" +
-          '<label class="field"><span class="field-label">Port UDP</span>' +
-          '<input type="number" data-pf="port" data-type="int" value="' + escapeHTML(p.port || 161) + '"></label>';
-        if (!isV3) {
-          advancedFields +=
-            '<label class="field"><span class="field-label">Communauté SNMP</span>' +
-            '<input type="text" class="mono" data-pf="community" value="' + escapeHTML(p.community || "public") + '"></label>';
-        } else {
-          advancedFields +=
-            '<label class="field"><span class="field-label">Utilisateur SNMPv3</span>' +
-            '<input type="text" class="mono" data-pf="user" value="' + escapeHTML(p.user || "") + '"></label>' +
-            '<label class="field"><span class="field-label">Auth proto</span>' +
-            '<select data-pf="auth_proto">' + ["NONE", "MD5", "SHA", "SHA256", "SHA512"].map((a) => '<option value="' + a + '"' + ((p.auth_proto || "SHA256").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>").join("") + "</select></label>" +
-            '<label class="field"><span class="field-label">Mot de passe Auth</span>' +
-            '<input type="password" class="mono" data-pf="auth_pass" value="' + escapeHTML(p.auth_pass || "") + '"></label>' +
-            '<label class="field"><span class="field-label">Priv proto</span>' +
-            '<select data-pf="priv_proto">' + ["NONE", "DES", "AES", "AES192", "AES256"].map((pr) => '<option value="' + pr + '"' + ((p.priv_proto || "AES").toUpperCase() === pr ? " selected" : "") + ">" + pr + "</option>").join("") + "</select></label>" +
-            '<label class="field"><span class="field-label">Mot de passe Priv</span>' +
-            '<input type="password" class="mono" data-pf="priv_pass" value="' + escapeHTML(p.priv_pass || "") + '"></label>';
-        }
-        if (p.kind === "snmp_oid") {
-          advancedFields +=
-            '<label class="field"><span class="field-label">Valeur attendue</span>' +
-            '<input type="text" class="mono" data-pf="expected_value" value="' + escapeHTML(p.expected_value || "") + '"></label>' +
-            '<label class="field"><span class="field-label">Min</span>' +
-            '<input type="number" step="any" data-pf="min_value" data-type="floatptr" value="' + escapeHTML(p.min_value != null ? p.min_value : "") + '"></label>' +
-            '<label class="field"><span class="field-label">Max</span>' +
-            '<input type="number" step="any" data-pf="max_value" data-type="floatptr" value="' + escapeHTML(p.max_value != null ? p.max_value : "") + '"></label>';
-        }
-        break;
-      }
-
-      case "node_exporter":
-      case "windows_exporter":
-        simpleFields =
-          '<label class="field span-2"><span class="field-label">Adresse des métriques (/metrics)</span>' +
-          '<input type="url" class="mono" data-pf="url" value="' + escapeHTML(p.url || "") + '" placeholder="http://192.168.1.10:9100/metrics"></label>';
-        if (p.kind === "windows_exporter") {
-          simpleFields +=
-            '<label class="field span-2"><span class="field-label">Services Windows à surveiller (virgules)</span>' +
-            '<input type="text" class="mono" data-pf="services" data-type="csv" value="' + escapeHTML((p.services || []).join(", ")) + '" placeholder="W32Time, VeeamBackupSvc"></label>';
-        }
-        advancedFields =
-          '<label class="field"><span class="field-label">Alerte disque max. (%)</span>' +
-          '<input type="number" step="any" data-pf="max_disk_percent" data-type="float" value="' + escapeHTML(p.max_disk_percent || 90) + '"></label>' +
-          '<label class="field"><span class="field-label">Alerte RAM max. (%)</span>' +
-          '<input type="number" step="any" data-pf="max_ram_percent" data-type="float" value="' + escapeHTML(p.max_ram_percent || 92) + '"></label>' +
-          '<label class="field span-2"><span class="field-label">Disques spécifiques (optionnel)</span>' +
-          '<input type="text" class="mono" data-pf="disks" data-type="csv" value="' + escapeHTML((p.disks || []).join(", ")) + '"></label>';
-        break;
-    }
-
-    return (
-      '<div class="editor-header">' +
-      "<h2>" + escapeHTML(p.id || "Nouveau service") + "</h2>" +
-      '<button type="button" class="inline-danger" id="delete-probe-btn">Supprimer</button>' +
-      "</div>" +
-      '<div class="form-grid two-col">' +
-      '<label class="field"><span class="field-label">Nom du service</span>' +
-      '<input type="text" class="mono" data-pf="id" value="' + escapeHTML(p.id || "") + '"></label>' +
-      '<label class="field"><span class="field-label">Catégorie</span>' +
-      '<select data-pf="kind" data-rerender="1">' + kindOptions + "</select></label>" +
-      simpleFields +
-      "</div>" +
-      '<details class="advanced-fold"><summary>Options avancées (fréquence, seuils, sécurité)</summary>' +
-      '<div class="form-grid two-col fold-body">' +
-      '<label class="field"><span class="field-label">Vérifier toutes les</span>' +
-      '<input type="text" class="mono" data-pf="interval" value="' + escapeHTML(p.interval || "60s") + '"></label>' +
-      '<label class="field"><span class="field-label">Temps limite</span>' +
-      '<input type="text" class="mono" data-pf="timeout" value="' + escapeHTML(p.timeout || "10s") + '"></label>' +
-      advancedFields +
-      "</div></details>"
-    );
-  }
-
-  function bindProbeFormEvents(idx) {
-    const editorEl = $("probe-editor");
-    editorEl.querySelectorAll("[data-pf]").forEach((el) => {
-      const eventName = el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input";
-      el.addEventListener(eventName, () => {
-        const probe = state.config.probes[idx];
-        const field = el.dataset.pf;
-        const type = el.dataset.type || "string";
-
-        if (field === "kind") {
-          const prevID = probe.id;
-          state.config.probes[idx] = defaultProbeForKind(el.value, idx);
-          if (prevID) state.config.probes[idx].id = prevID;
-          state.yamlEditedDirectly = false;
-          setDirty(true);
-          renderProbesWorkspace();
-          return;
-        }
-
-        if (type === "bool") probe[field] = el.checked;
-        else if (type === "int") probe[field] = el.value === "" ? 0 : parseInt(el.value, 10) || 0;
-        else if (type === "intptr") probe[field] = el.value === "" ? null : parseInt(el.value, 10);
-        else if (type === "float") probe[field] = el.value === "" ? 0 : parseFloat(el.value) || 0;
-        else if (type === "floatptr") probe[field] = el.value === "" ? null : parseFloat(el.value);
-        else if (type === "csv") probe[field] = el.value.split(",").map((s) => s.trim()).filter(Boolean);
-        else probe[field] = el.value;
-
-        state.yamlEditedDirectly = false;
-        setDirty(true);
-
-        if (el.dataset.rerender === "1") {
-          renderProbesWorkspace();
-        } else if (field === "id" || field === "interval") {
-          const item = $("probe-list").querySelector('[data-select-probe="' + idx + '"]');
-          if (item) {
-            item.querySelector(".probe-item-id").textContent = probe.id || "Service sans nom";
-            item.querySelector(".probe-item-meta").textContent = probeKindLabel(probe.kind) + " · " + (probe.interval || "60s");
-          }
-          const h2 = editorEl.querySelector(".editor-header h2");
-          if (h2 && field === "id") h2.textContent = probe.id || "Nouveau service";
-        }
-      });
-    });
-
-    const delBtn = $("delete-probe-btn");
-    if (delBtn) {
-      delBtn.addEventListener("click", () => {
-        state.config.probes.splice(idx, 1);
-        state.yamlEditedDirectly = false;
-        setDirty(true);
-        renderProbesWorkspace();
-      });
-    }
-  }
-
-  /* ---------------- SAVE & ACTIONS ---------------- */
-
   async function saveConfiguration(customSuccessMsg) {
-    clearFeedback();
+    readGeneralFieldsIntoConfig();
     const saveBtn = $("save-btn");
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Enregistrement...";
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Enregistrement...";
+    }
 
     try {
-      let body;
-      if (state.yamlEditedDirectly) {
-        body = JSON.stringify({ yaml: $("yaml-editor").value });
-      } else {
-        readGeneralFieldsIntoConfig();
-        body = JSON.stringify({ config: state.config });
-      }
-
-      const { ok, data } = await apiFetch("/api/config", { method: "PUT", body });
+      const { ok, data } = await apiFetch("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({ config: state.config })
+      });
       if (!ok) {
-        const msg = (data.errors && data.errors.join(" | ")) || data.error || "Configuration invalide";
-        showFeedback("err", "Vérifiez vos paramètres : " + msg);
+        const msg = (data.errors && data.errors.join(" · ")) || data.error || "Paramètres invalides";
+        showToast("err", "Impossible d'enregistrer : " + msg);
         return false;
       }
 
       state.config = data.config;
-      state.rawYAML = data.yaml;
-      state.yamlEditedDirectly = false;
+      state.savedConfigSnapshot = deepClone(data.config);
+      state.rawYAML = data.yaml || "";
+      state.writable = Boolean(data.persisted);
       setDirty(false);
       populateFormsFromConfig();
 
       if (data.persisted) {
-        showFeedback("ok", customSuccessMsg || "Modifications enregistrées et activées.");
+        showToast("ok", customSuccessMsg || "Modifications enregistrées et actives.");
       } else {
-        showFeedback(
+        showToast(
           "warn",
-          "Activé en mémoire, mais le fichier est en lecture seule. Téléchargez config.yaml dans Réglages."
+          "Activé immédiatement (le volume Docker est en lecture seule : retirez :ro dans docker-compose.yml pour conserver après redémarrage).",
+          7500
         );
       }
       await fetchStatus();
       return true;
     } catch (err) {
-      showFeedback("err", "Erreur d'enregistrement : " + err.message);
+      showToast("err", "Erreur d'enregistrement : " + err.message);
       return false;
     } finally {
-      saveBtn.disabled = false;
-      saveBtn.textContent = "Enregistrer";
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Enregistrer maintenant";
+      }
     }
   }
 
-  async function runKeygen(goToFriends) {
-    clearFeedback();
+  async function runQuickSetup() {
+    const btn = $("quick-setup-btn");
+    btn.disabled = true;
+    btn.textContent = "Démarrage...";
     try {
       const { ok, data } = await apiFetch("/api/keygen", { method: "POST", body: "{}" });
       if (!ok) {
-        showFeedback("err", data.error || "Impossible de générer les clés");
+        showToast("err", data.error || "Impossible de créer votre identité.");
+        return;
+      }
+      const chosenName = ($("setup-node-name").value || "").trim() || "mon-homelab";
+      state.config.node.name = chosenName;
+      state.config.node.private_key_hex = data.private_key_hex;
+      state.config.node.pubkey_hex = data.pubkey_hex;
+      state.config.node.group_psk_hex = data.group_psk_hex;
+      $("cfg-node-name").value = chosenName;
+      $("cfg-privkey").value = data.private_key_hex;
+      $("cfg-psk").value = data.group_psk_hex;
+      $("id-pubkey").value = data.pubkey_hex;
+      $("id-topic-tag").value = data.topic_tag;
+
+      await saveConfiguration("MeshWatch est démarré et prêt !");
+    } catch (err) {
+      showToast("err", err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Démarrer en un clic";
+    }
+  }
+
+  async function runRegenerateKeys() {
+    if (!confirm("Générer une nouvelle identité ? Vos amis devront recevoir votre nouveau code d'invitation.")) return;
+    try {
+      const { ok, data } = await apiFetch("/api/keygen", { method: "POST", body: "{}" });
+      if (!ok) {
+        showToast("err", data.error || "Impossible de générer les clés");
         return;
       }
       state.config.node.private_key_hex = data.private_key_hex;
       state.config.node.pubkey_hex = data.pubkey_hex;
-      if (!state.config.node.group_psk_hex) {
-        state.config.node.group_psk_hex = data.group_psk_hex;
-      } else if (confirm("Créer aussi un nouveau mot de passe de groupe ? Annulez pour garder celui partagé avec vos amis.")) {
+      if (confirm("Créer aussi une nouvelle clé secrète de groupe ? Annulez pour rester dans le groupe actuel.")) {
         state.config.node.group_psk_hex = data.group_psk_hex;
       }
       $("cfg-privkey").value = state.config.node.private_key_hex;
       $("cfg-psk").value = state.config.node.group_psk_hex;
       $("id-pubkey").value = data.pubkey_hex;
       $("id-topic-tag").value = data.topic_tag;
-      state.yamlEditedDirectly = false;
-      setDirty(true);
-      if (goToFriends) switchTab("friends");
-      showFeedback("ok", "Identité générée. Cliquez sur Enregistrer pour l'activer.");
+      await saveConfiguration("Nouvelles clés enregistrées.");
     } catch (err) {
-      showFeedback("err", err.message);
-    }
-  }
-
-  async function runTestNotify() {
-    clearFeedback();
-    readGeneralFieldsIntoConfig();
-    const btn = $("test-notify-btn");
-    const out = $("test-notify-output");
-    btn.disabled = true;
-    btn.textContent = "Envoi en cours...";
-    try {
-      const { ok, data } = await apiFetch("/api/test-notify", {
-        method: "POST",
-        body: JSON.stringify({
-          node_name: state.config.node.name,
-          notifications: state.config.notifications
-        })
-      });
-      if (!ok) {
-        showFeedback("err", data.error || "Activez au moins ntfy ou Photon avant de tester.");
-        out.hidden = true;
-        return;
-      }
-      out.innerHTML = (data.results || [])
-        .map((r) => {
-          const cls = r.ok ? "is-ok" : "is-err";
-          const label = r.ok ? "Reçu (" + r.latency_ms + " ms)" : "Échec : " + r.error;
-          return (
-            '<div class="test-output-line">' +
-            '<span class="cell-primary">' + escapeHTML(r.channel === "ntfy" ? "Téléphone (ntfy)" : "iMessage (Photon)") + "</span>" +
-            '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + escapeHTML(label) + "</span>" +
-            "</div>"
-          );
-        })
-        .join("");
-      out.hidden = false;
-      showFeedback(data.ok ? "ok" : "err", data.ok ? "Alerte de test envoyée avec succès." : "Un canal n'a pas répondu.");
-    } catch (err) {
-      showFeedback("err", err.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Envoyer une alerte de test";
+      showToast("err", err.message);
     }
   }
 
   async function runCheckWAN() {
     const btn = $("check-wan-btn");
     btn.disabled = true;
+    btn.textContent = "Vérification...";
     try {
       const { ok, data } = await apiFetch("/api/check-automute", { method: "POST", body: "{}" });
       if (!ok) {
-        showFeedback("warn", data.error || "Enregistrez d'abord votre configuration.");
+        showToast("warn", data.error || "Vérification impossible.");
         return;
       }
-      showFeedback(
+      showToast(
         data.muted ? "warn" : "ok",
-        data.muted ? "Internet injoignable : sourdine automatique activée." : "Connexion Internet fonctionnelle."
+        data.muted ? "Internet semble coupé : alertes mises en pause." : "Accès Internet opérationnel."
       );
       await fetchStatus();
     } catch (err) {
-      showFeedback("err", err.message);
+      showToast("err", err.message);
     } finally {
       btn.disabled = false;
+      btn.textContent = "Vérifier maintenant";
+    }
+  }
+
+  function exportBackup() {
+    const content = state.rawYAML || "";
+    if (!content) {
+      showToast("warn", "Aucune configuration à exporter.");
+      return;
+    }
+    const blob = new Blob([content], { type: "text/yaml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "meshwatch-sauvegarde.yaml";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("ok", "Sauvegarde exportée.");
+  }
+
+  async function importBackupFile(file) {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const { ok, data } = await apiFetch("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({ yaml: text })
+      });
+      if (!ok) {
+        const msg = (data.errors && data.errors.join(" · ")) || data.error || "Fichier de sauvegarde invalide";
+        showToast("err", "Restauration impossible : " + msg);
+        return;
+      }
+      state.config = data.config;
+      state.savedConfigSnapshot = deepClone(data.config);
+      state.rawYAML = data.yaml || text;
+      setDirty(false);
+      populateFormsFromConfig();
+      await fetchStatus();
+      showToast("ok", "Sauvegarde restaurée et activée.");
+    } catch (err) {
+      showToast("err", "Erreur lors de la restauration : " + err.message);
     }
   }
 
@@ -1340,6 +1938,7 @@
     const [cfgRes, stRes] = await Promise.all([apiFetch("/api/config"), apiFetch("/api/status")]);
     if (cfgRes.ok) {
       state.config = cfgRes.data.config;
+      state.savedConfigSnapshot = deepClone(cfgRes.data.config);
       state.rawYAML = cfgRes.data.yaml || "";
       state.configPath = cfgRes.data.config_path || "";
       state.writable = Boolean(cfgRes.data.writable);
@@ -1365,12 +1964,32 @@
       btn.addEventListener("click", () => switchTab(btn.dataset.goto));
     });
 
+    $("home-add-device-btn").addEventListener("click", () => switchTab("discover"));
+    $("dismiss-onboarding-btn").addEventListener("click", () => {
+      state.onboardingDismissed = true;
+      localStorage.setItem("mw_hide_onboarding", "1");
+      $("onboarding-card").hidden = true;
+    });
+
     $("save-btn").addEventListener("click", () => saveConfiguration());
-    $("quick-setup-btn").addEventListener("click", () => runKeygen(true));
-    $("keygen-btn").addEventListener("click", () => runKeygen(false));
+    $("save-alerts-btn").addEventListener("click", () => saveConfiguration("Réglages des alertes enregistrés."));
+    $("save-settings-btn").addEventListener("click", () => saveConfiguration("Réglages enregistrés."));
+    $("discard-changes-btn").addEventListener("click", () => {
+      if (state.savedConfigSnapshot) {
+        state.config = deepClone(state.savedConfigSnapshot);
+        populateFormsFromConfig();
+      }
+      setDirty(false);
+      showToast("ok", "Modifications annulées.");
+    });
+
+    $("quick-setup-btn").addEventListener("click", runQuickSetup);
+    $("keygen-btn").addEventListener("click", runRegenerateKeys);
     $("test-notify-btn").addEventListener("click", runTestNotify);
+    $("generate-ntfy-btn").addEventListener("click", generateRandomNtfyChannel);
     $("check-wan-btn").addEventListener("click", runCheckWAN);
 
+    // Docker & LAN discovery
     $("scan-docker-btn").addEventListener("click", runDockerScan);
     $("apply-docker-btn").addEventListener("click", applyDockerSelection);
     $("docker-filter-input").addEventListener("input", renderDockerContainers);
@@ -1388,37 +2007,56 @@
       }
     });
 
+    // Guided probe modal
+    $("open-add-probe-btn").addEventListener("click", () => openProbeModal(-1));
+    $("probe-modal-close").addEventListener("click", closeProbeModal);
+    $("probe-modal-back").addEventListener("click", () => {
+      $("probe-modal-picker").hidden = false;
+      $("probe-modal-form").hidden = true;
+      $("probe-modal-title").textContent = "Ajouter un appareil ou service";
+      $("probe-modal-subtitle").textContent = "Choisissez simplement ce que vous souhaitez surveiller.";
+    });
+    $("probe-modal-test").addEventListener("click", runModalProbeTest);
+    $("probe-modal-form").addEventListener("submit", submitProbeModal);
+    document.querySelectorAll("[data-pick-kind]").forEach((btn) => {
+      btn.addEventListener("click", () => pickProbeKindInModal(btn.dataset.pickKind));
+    });
+
+    // Friends 1-click invite & modal
+    $("invite-include-group").addEventListener("change", updateInviteCodeDisplay);
+    $("copy-invite-btn").addEventListener("click", async () => {
+      const code = $("my-invite-code").value;
+      if (!code) {
+        showToast("warn", "Démarrez d'abord votre installation pour obtenir un code d'invitation.");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(code);
+        showToast("ok", "Code d'invitation copié ! Envoyez-le à votre ami.");
+      } catch (_) {
+        $("my-invite-code").select();
+      }
+    });
+    $("friend-invite-input").addEventListener("input", handleInviteInput);
+    $("add-friend-from-invite-btn").addEventListener("click", addFriendFromInvite);
+    $("add-friend-manual-btn").addEventListener("click", () => openFriendModal(-1));
+    $("friend-modal-close").addEventListener("click", closeFriendModal);
+    $("friend-modal-cancel").addEventListener("click", closeFriendModal);
+    $("friend-modal-form").addEventListener("submit", submitFriendModal);
+
+    // Updates & backup
     $("check-update-btn").addEventListener("click", () => checkUpdates(true));
     $("update-now-btn").addEventListener("click", triggerUpdate);
     $("settings-update-btn").addEventListener("click", triggerUpdate);
-
-    $("add-probe-btn").addEventListener("click", () => {
-      if (!state.config.probes) state.config.probes = [];
-      const kind = $("quick-add-kind").value || "http";
-      state.config.probes.push(defaultProbeForKind(kind, state.config.probes.length));
-      state.selectedProbeIndex = state.config.probes.length - 1;
-      state.yamlEditedDirectly = false;
-      setDirty(true);
-      renderProbesWorkspace();
+    $("export-backup-btn").addEventListener("click", exportBackup);
+    $("import-backup-btn").addEventListener("click", () => $("import-backup-file").click());
+    $("import-backup-file").addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (file) importBackupFile(file);
+      e.target.value = "";
     });
 
-    $("add-peer-btn").addEventListener("click", () => {
-      if (!state.config.peers) state.config.peers = [];
-      state.config.peers.push({ name: "", pubkey_hex: "", kuma_push_url: "" });
-      state.yamlEditedDirectly = false;
-      setDirty(true);
-      renderPeersEditor();
-    });
-
-    $("copy-invite-btn").addEventListener("click", async () => {
-      const pub = $("id-pubkey").value;
-      if (!pub) return;
-      try {
-        await navigator.clipboard.writeText(pub);
-        showFeedback("ok", "Votre code ami a été copié dans le presse-papiers.");
-      } catch (_) {}
-    });
-
+    // Track unsaved edits on general / alert / settings forms
     [
       "cfg-node-name",
       "cfg-hb-interval",
@@ -1444,83 +2082,10 @@
       const el = $(id);
       if (!el) return;
       const evt = el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input";
-      el.addEventListener(evt, () => {
-        state.yamlEditedDirectly = false;
-        setDirty(true);
-      });
+      el.addEventListener(evt, () => setDirty(true));
     });
 
-    $("yaml-editor").addEventListener("input", () => {
-      state.yamlEditedDirectly = true;
-      setDirty(true);
-    });
-
-    $("yaml-details").addEventListener("toggle", async (e) => {
-      if (e.target.open && !state.yamlEditedDirectly) {
-        readGeneralFieldsIntoConfig();
-        try {
-          const { ok, data } = await apiFetch("/api/validate", {
-            method: "POST",
-            body: JSON.stringify({ config: state.config })
-          });
-          if (ok && data.yaml) {
-            state.rawYAML = data.yaml;
-            $("yaml-editor").value = data.yaml;
-          }
-        } catch (_) {}
-      }
-    });
-
-    $("validate-yaml-btn").addEventListener("click", async () => {
-      clearFeedback();
-      const { ok, data } = await apiFetch("/api/validate", {
-        method: "POST",
-        body: JSON.stringify({ yaml: $("yaml-editor").value })
-      });
-      if (!ok) {
-        showFeedback("err", (data.errors && data.errors.join(" | ")) || data.error || "YAML invalide");
-        return;
-      }
-      state.config = data.config;
-      state.rawYAML = $("yaml-editor").value;
-      populateFormsFromConfig();
-      $("yaml-editor").value = state.rawYAML;
-      showFeedback("ok", "Configuration YAML valide.");
-    });
-
-    $("sync-from-forms-btn").addEventListener("click", async () => {
-      readGeneralFieldsIntoConfig();
-      state.yamlEditedDirectly = false;
-      const { ok, data } = await apiFetch("/api/validate", {
-        method: "POST",
-        body: JSON.stringify({ config: state.config })
-      });
-      if (ok && data.yaml) {
-        state.rawYAML = data.yaml;
-        $("yaml-editor").value = data.yaml;
-        showFeedback("ok", "YAML mis à jour.");
-      }
-    });
-
-    $("copy-yaml-btn").addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText($("yaml-editor").value);
-        showFeedback("ok", "YAML copié.");
-      } catch (_) {}
-    });
-
-    $("download-yaml-btn").addEventListener("click", () => {
-      const blob = new Blob([$("yaml-editor").value], { type: "text/yaml;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "config.yaml";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    });
-
+    // Copy & reveal helpers
     document.querySelectorAll("[data-copy]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const input = $(btn.dataset.copy);
@@ -1546,6 +2111,15 @@
       });
     });
 
+    // Close modals with Escape
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (!$("probe-modal").hidden) closeProbeModal();
+        if (!$("friend-modal").hidden) closeFriendModal();
+      }
+    });
+
+    // Auth form
     $("auth-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       state.token = $("auth-token-input").value.trim();
@@ -1575,7 +2149,7 @@
       }
       await loadInitialData();
     } catch (err) {
-      showFeedback("err", "Impossible de joindre MeshWatch : " + err.message);
+      showToast("err", "Impossible de joindre MeshWatch : " + err.message);
     }
   }
 

@@ -15,7 +15,7 @@ const (
 	synoOIDTemperature  = ".1.3.6.1.4.1.6574.1.2.0"
 	synoOIDSystemFan    = ".1.3.6.1.4.1.6574.1.4.1.0"
 	synoOIDPowerFan     = ".1.3.6.1.4.1.6574.1.4.2.0"
-	synoOIDRAIDStatus   = ".1.3.6.1.4.1.6574.3.1.1.4"
+	synoOIDRAIDStatus   = ".1.3.6.1.4.1.6574.3.1.1.3"
 	synoOIDDiskStatus   = ".1.3.6.1.4.1.6574.2.1.1.5"
 )
 

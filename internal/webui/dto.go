@@ -340,7 +340,6 @@ func defaultTemplateDTO() ConfigDTO {
 				"wss://relay.damus.io",
 				"wss://nos.lol",
 				"wss://relay.primal.net",
-				"wss://relay.nostr.band",
 			},
 		},
 		AutoMute: AutoMuteDTO{

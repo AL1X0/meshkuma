@@ -14,7 +14,6 @@ nostr:
     - "wss://relay.damus.io"
     - "wss://nos.lol"
     - "wss://relay.primal.net"
-    - "wss://relay.nostr.band"
 
 auto_mute:
   targets: ["1.1.1.1:443", "9.9.9.9:443"]

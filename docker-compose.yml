@@ -19,17 +19,16 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - ./config.yaml:/etc/meshwatch/config.yaml:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config.yaml:/etc/meshwatch/config.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - meshwatch-net
-    # Si la sonde Docker lit /var/run/docker.sock en mode nonroot, ajoute le GID du groupe docker
-    # de l'hôte (stat -c '%g' /var/run/docker.sock) ou utilise un docker-socket-proxy en lecture seule :
+    # Si la sonde Docker ou la mise à jour en 1 clic lit /var/run/docker.sock en mode nonroot,
+    # ajoute le GID du groupe docker de l'hôte (stat -c '%g' /var/run/docker.sock) :
     # group_add:
     #   - "999"
-    # Pour activer la console web locale de configuration (opt-in, désactivée par défaut) :
-    # 1. Retire ":ro" sur ./config.yaml si tu veux sauvegarder directement depuis l'interface.
-    # 2. Décommente ports + environment ci-dessous (ne jamais exposer sur Internet sans VPN/proxy auth) :
+    # Pour activer l'interface web locale de configuration (opt-in, désactivée par défaut) :
+    # Décommente ports + environment ci-dessous (ne jamais exposer sur Internet sans VPN/proxy auth) :
     # ports:
     #   - "127.0.0.1:8080:8080"
     # environment:
