@@ -158,7 +158,7 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 	} else {
 		// No tagged release yet: prefer the latest commit on main whose CI Docker image
 		// actually succeeded and was pushed to GHCR, preventing stale pulls during builds.
-		readyRun, building, hasRuns := u.fetchLatestReadyMainBuild(ctx)
+		readyRun, alreadyAhead, building, hasRuns := u.fetchLatestReadyMainBuild(ctx)
 		res.Building = building
 		if hasRuns {
 			short := readyRun.HeadSHA
@@ -170,7 +170,13 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 			res.ReleaseName = firstLine(readyRun.HeadCommit.Message)
 			res.ReleaseNotes = trimNotes(readyRun.HeadCommit.Message)
 			res.ReleaseURL = fmt.Sprintf("https://github.com/%s/commit/%s", u.repo, readyRun.HeadSHA)
-			res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(readyRun.HeadSHA, u.currentCommit)
+			if alreadyAhead {
+				res.LatestCommit = u.currentCommit
+				res.LatestVersion = "main@" + u.currentCommit
+				res.UpdateAvailable = false
+			} else {
+				res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(readyRun.HeadSHA, u.currentCommit)
+			}
 			repoBase, _ := splitImageRef(u.image)
 			res.Image = repoBase + ":main-" + short
 		} else {
@@ -245,47 +251,60 @@ type ghWorkflowRun struct {
 	} `json:"head_commit"`
 }
 
-func (u *Updater) fetchLatestReadyMainBuild(ctx context.Context) (ready ghWorkflowRun, building bool, ok bool) {
+func (u *Updater) fetchLatestReadyMainBuild(ctx context.Context) (ready ghWorkflowRun, alreadyAhead bool, building bool, ok bool) {
 	endpoint := fmt.Sprintf("%s/repos/%s/actions/runs?branch=main&event=push&per_page=10", u.apiBaseURL, u.repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return ghWorkflowRun{}, false, false
+		return ghWorkflowRun{}, false, false, false
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "MeshWatch-Updater/1.0")
 
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return ghWorkflowRun{}, false, false
+		return ghWorkflowRun{}, false, false, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ghWorkflowRun{}, false, false
+		return ghWorkflowRun{}, false, false, false
 	}
 
 	var payload struct {
 		WorkflowRuns []ghWorkflowRun `json:"workflow_runs"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&payload); err != nil {
-		return ghWorkflowRun{}, false, false
+		return ghWorkflowRun{}, false, false, false
 	}
 	if len(payload.WorkflowRuns) == 0 {
-		return ghWorkflowRun{}, false, false
+		return ghWorkflowRun{}, false, false, false
 	}
 
-	// Check if the newest push run is still compiling/publishing.
+	// Check if the newest push run is still compiling/publishing (and isn't already running locally).
 	newest := payload.WorkflowRuns[0]
 	if (newest.Status == "queued" || newest.Status == "in_progress") &&
 		(u.currentCommit == "" || !strings.HasPrefix(newest.HeadSHA, u.currentCommit)) {
 		building = true
 	}
 
-	for _, run := range payload.WorkflowRuns {
-		if run.Status == "completed" && run.Conclusion == "success" && run.HeadSHA != "" {
-			return run, building, true
+	// Runs are newest-first: if currentCommit appears before the first successful CI run,
+	// we are already on (or ahead of) the latest published image — never offer a downgrade.
+	curIdx := -1
+	readyIdx := -1
+	for i, run := range payload.WorkflowRuns {
+		if curIdx == -1 && u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && strings.HasPrefix(run.HeadSHA, u.currentCommit) {
+			curIdx = i
+		}
+		if readyIdx == -1 && run.Status == "completed" && run.Conclusion == "success" && run.HeadSHA != "" {
+			readyIdx = i
 		}
 	}
-	return ghWorkflowRun{}, building, false
+	if readyIdx >= 0 {
+		if curIdx >= 0 && curIdx <= readyIdx {
+			alreadyAhead = true
+		}
+		return payload.WorkflowRuns[readyIdx], alreadyAhead, building, true
+	}
+	return ghWorkflowRun{}, false, building, false
 }
 
 type ghCommit struct {

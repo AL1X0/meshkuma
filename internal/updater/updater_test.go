@@ -149,6 +149,22 @@ func TestCheckWaitsForSuccessfulCIBuild(t *testing.T) {
 	if !resOld.UpdateAvailable || resOld.Image != "ghcr.io/al1x0/meshkuma:main-1111111" {
 		t.Fatalf("expected UpdateAvailable=true with exact tag main-1111111, got %+v", resOld)
 	}
+
+	// Already running the newest local commit (9999999) whose CI run is still in_progress:
+	// must NEVER offer a downgrade back to 1111111.
+	uAhead := New(Config{
+		Repo:          "AL1X0/meshkuma",
+		APIBaseURL:    ghMock.URL,
+		CurrentVer:    "main-9999999",
+		CurrentCommit: "9999999",
+	})
+	resAhead, err := uAhead.Check(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Check(ahead) error = %v", err)
+	}
+	if resAhead.UpdateAvailable || resAhead.Building {
+		t.Fatalf("must not downgrade or mark building when already on newest commit, got %+v", resAhead)
+	}
 }
 
 func TestRunSelfUpdateHelperSuccess(t *testing.T) {
