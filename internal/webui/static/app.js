@@ -101,6 +101,41 @@
       .replace(/"/g, "&quot;");
   }
 
+  async function copyTextToClipboard(text, fallbackInput) {
+    if (!text) return false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {}
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "-9999px";
+    ta.style.fontSize = "16px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (_) {
+      copied = false;
+    }
+    ta.remove();
+    if (!copied && fallbackInput && fallbackInput.type !== "password") {
+      try {
+        fallbackInput.focus();
+        fallbackInput.select();
+      } catch (_) {}
+    }
+    return copied;
+  }
+
   function formatDurationSec(sec) {
     const s = Math.max(0, Math.floor(sec || 0));
     if (s < 60) return s + "s";
@@ -2024,17 +2059,25 @@
 
     // Friends 1-click invite & modal
     $("invite-include-group").addEventListener("change", updateInviteCodeDisplay);
+    $("my-invite-code").addEventListener("click", (e) => e.target.select());
     $("copy-invite-btn").addEventListener("click", async () => {
-      const code = $("my-invite-code").value;
+      const btn = $("copy-invite-btn");
+      const input = $("my-invite-code");
+      const code = input.value;
       if (!code) {
         showToast("warn", "Démarrez d'abord votre installation pour obtenir un code d'invitation.");
         return;
       }
-      try {
-        await navigator.clipboard.writeText(code);
+      const ok = await copyTextToClipboard(code, input);
+      if (ok) {
+        const prev = btn.textContent;
+        btn.textContent = "Copié !";
+        setTimeout(() => {
+          btn.textContent = prev;
+        }, 1800);
         showToast("ok", "Code d'invitation copié ! Envoyez-le à votre ami.");
-      } catch (_) {
-        $("my-invite-code").select();
+      } else {
+        showToast("warn", "Code sélectionné : appuyez sur Ctrl+C (ou Cmd+C) pour le copier.");
       }
     });
     $("friend-invite-input").addEventListener("input", handleInviteInput);
@@ -2090,14 +2133,17 @@
       btn.addEventListener("click", async () => {
         const input = $(btn.dataset.copy);
         if (!input || !input.value) return;
-        try {
-          await navigator.clipboard.writeText(input.value);
+        const ok = await copyTextToClipboard(input.value, input);
+        if (ok) {
           const prev = btn.textContent;
-          btn.textContent = "Copié";
+          btn.textContent = "Copié !";
           setTimeout(() => {
             btn.textContent = prev;
-          }, 1400);
-        } catch (_) {}
+          }, 1600);
+          showToast("ok", "Copié dans le presse-papiers.");
+        } else {
+          showToast("warn", "Sélectionné : appuyez sur Ctrl+C (ou Cmd+C) pour copier.");
+        }
       });
     });
 
