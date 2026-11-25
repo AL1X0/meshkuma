@@ -19,6 +19,27 @@ type ProbeResult struct {
 	Latency int64  `json:"latency_ms,omitempty"`
 }
 
+// HistoryPoint records one check sample for the built-in availability history bar.
+type HistoryPoint struct {
+	TS        int64 `json:"ts"`
+	OK        bool  `json:"ok"`
+	LatencyMs int64 `json:"latency_ms,omitempty"`
+}
+
+// IncidentEvent records a state transition (outage or recovery) for the built-in activity timeline.
+type IncidentEvent struct {
+	TS      int64  `json:"ts"`
+	Source  string `json:"source"` // "local" or "peer"
+	Target  string `json:"target"`
+	OK      bool   `json:"ok"`
+	Summary string `json:"summary"`
+}
+
+const (
+	maxHistoryPoints  = 36
+	maxIncidentEvents = 40
+)
+
 // Probe is implemented by every local monitoring probe.
 type Probe interface {
 	ID() string
@@ -39,11 +60,13 @@ type Scheduler struct {
 	probes []ScheduledProbe
 	logger *slog.Logger
 
-	mu      sync.RWMutex
-	results map[string]ProbeResult
-	ready   chan struct{}
-	started bool
-	stopped bool
+	mu        sync.RWMutex
+	results   map[string]ProbeResult
+	history   map[string][]HistoryPoint
+	incidents []IncidentEvent
+	ready     chan struct{}
+	started   bool
+	stopped   bool
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -60,6 +83,7 @@ func NewScheduler(scheduled []ScheduledProbe, logger *slog.Logger) *Scheduler {
 		probes:  copied,
 		logger:  logger,
 		results: make(map[string]ProbeResult, len(copied)),
+		history: make(map[string][]HistoryPoint, len(copied)),
 		ready:   make(chan struct{}),
 	}
 }
@@ -180,6 +204,32 @@ func (s *Scheduler) Snapshot() (results []ProbeResult, overallOK bool) {
 	return results, overallOK
 }
 
+// HistorySnapshot returns a copy of the recent check history for each probe.
+func (s *Scheduler) HistorySnapshot() map[string][]HistoryPoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[string][]HistoryPoint, len(s.history))
+	for id, pts := range s.history {
+		cp := make([]HistoryPoint, len(pts))
+		copy(cp, pts)
+		out[id] = cp
+	}
+	return out
+}
+
+// Incidents returns recent local probe state transitions (newest first).
+func (s *Scheduler) Incidents() []IncidentEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]IncidentEvent, len(s.incidents))
+	for i := range s.incidents {
+		out[i] = s.incidents[len(s.incidents)-1-i]
+	}
+	return out
+}
+
 func (s *Scheduler) runProbeLoop(ctx context.Context, sp ScheduledProbe, initialWG *sync.WaitGroup) {
 	defer s.wg.Done()
 
@@ -220,9 +270,34 @@ func (s *Scheduler) execOnce(ctx context.Context, p Probe, timeout time.Duration
 		res.Kind = p.Kind()
 	}
 
+	nowUnix := time.Now().Unix()
+
 	s.mu.Lock()
 	prev, existed := s.results[res.ID]
 	s.results[res.ID] = res
+
+	pts := append(s.history[res.ID], HistoryPoint{
+		TS:        nowUnix,
+		OK:        res.OK,
+		LatencyMs: res.Latency,
+	})
+	if len(pts) > maxHistoryPoints {
+		pts = pts[len(pts)-maxHistoryPoints:]
+	}
+	s.history[res.ID] = pts
+
+	if (existed && prev.OK != res.OK) || (!existed && !res.OK) {
+		s.incidents = append(s.incidents, IncidentEvent{
+			TS:      nowUnix,
+			Source:  "local",
+			Target:  res.ID,
+			OK:      res.OK,
+			Summary: res.Summary,
+		})
+		if len(s.incidents) > maxIncidentEvents {
+			s.incidents = s.incidents[len(s.incidents)-maxIncidentEvents:]
+		}
+	}
 	s.mu.Unlock()
 
 	if !existed || prev.OK != res.OK {

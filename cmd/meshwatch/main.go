@@ -9,13 +9,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
 
 	"meshwatch/internal/config"
 	mwcrypto "meshwatch/internal/crypto"
-	"meshwatch/internal/kuma"
 	"meshwatch/internal/notify"
 	"meshwatch/internal/probes"
 	"meshwatch/internal/quorum"
@@ -60,7 +60,7 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "MeshWatch — Decentralized P2P Monitoring over Nostr + Uptime Kuma")
+	fmt.Fprintln(w, "MeshWatch — Decentralized P2P Homelab Monitoring over Nostr")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  meshwatch keygen                                           Generate Nostr keypair and 32-byte group PSK")
@@ -322,7 +322,6 @@ func (m *agentManager) ApplyConfig(_ context.Context, rawYAML []byte, cfg *confi
 	}
 
 	notifiers := notify.BuildFromConfig(cfg.Notifications)
-	kumaPusher := kuma.NewPusher(5 * time.Second)
 
 	engine := quorum.NewEngine(quorum.EngineConfig{
 		SelfNodeName:    cfg.Node.Name,
@@ -332,7 +331,6 @@ func (m *agentManager) ApplyConfig(_ context.Context, rawYAML []byte, cfg *confi
 		AutoMuteTargets: cfg.AutoMute.Targets,
 		AutoMuteTimeout: cfg.AutoMute.Timeout,
 		Publisher:       pool,
-		Kuma:            kumaPusher,
 		Notifier:        notifiers,
 		Logger:          logger,
 	})
@@ -472,6 +470,14 @@ func (m *agentManager) Status() webui.RuntimeStatus {
 	}
 
 	probeResults, overallOK := inst.scheduler.Snapshot()
+	incidents := append(inst.scheduler.Incidents(), inst.engine.Incidents()...)
+	sort.Slice(incidents, func(i, j int) bool {
+		return incidents[i].TS > incidents[j].TS
+	})
+	if len(incidents) > 30 {
+		incidents = incidents[:30]
+	}
+
 	return webui.RuntimeStatus{
 		Mode:            "running",
 		ConfigPath:      m.configPath,
@@ -488,7 +494,9 @@ func (m *agentManager) Status() webui.RuntimeStatus {
 		AutoMuteTargets: append([]string(nil), inst.cfg.AutoMute.Targets...),
 		Relays:          inst.pool.RelayStatuses(),
 		Probes:          probeResults,
+		ProbeHistory:    inst.scheduler.HistorySnapshot(),
 		Peers:           inst.engine.PeerStatuses(),
+		Incidents:       incidents,
 		Notifications: webui.NotificationsStatus{
 			NtfyEnabled:   inst.cfg.Notifications.Ntfy.Enabled,
 			PhotonEnabled: inst.cfg.Notifications.PhotonIMessage.Enabled,

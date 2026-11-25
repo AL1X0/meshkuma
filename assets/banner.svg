@@ -51,7 +51,7 @@
 
   <!-- Title & subtitle -->
   <text x="320" y="132" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="64" font-weight="800" letter-spacing="-1.5">MeshWatch</text>
-  <text x="322" y="176" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="22" font-weight="400">Supervision Mesh P2P décentralisée sur Nostr &amp; Uptime Kuma</text>
+  <text x="322" y="176" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="22" font-weight="400">Supervision Mesh P2P décentralisée, autonome et chiffrée sur Nostr</text>
 
   <!-- Feature pills -->
   <g transform="translate(322, 206)" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13.5" font-weight="600">

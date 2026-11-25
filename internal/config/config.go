@@ -75,9 +75,8 @@ type AutoMuteConfig struct {
 
 // PeerConfig describes a trusted peer in the mesh.
 type PeerConfig struct {
-	Name        string `yaml:"name"`
-	PubKeyHex   string `yaml:"pubkey_hex"`
-	KumaPushURL string `yaml:"kuma_push_url"`
+	Name      string `yaml:"name"`
+	PubKeyHex string `yaml:"pubkey_hex"`
 }
 
 // ProbeConfig holds configuration for any supported local monitoring probe.
@@ -365,7 +364,6 @@ func (c *Config) Validate() error {
 		p := &c.Peers[i]
 		p.Name = strings.TrimSpace(p.Name)
 		p.PubKeyHex = strings.ToLower(strings.TrimSpace(p.PubKeyHex))
-		p.KumaPushURL = strings.TrimSpace(p.KumaPushURL)
 
 		if p.Name == "" {
 			errs = append(errs, fmt.Errorf("peers[%d].name is required", i))
@@ -380,11 +378,6 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("peers[%d].pubkey_hex (%s) is duplicated", i, p.PubKeyHex))
 			}
 			seenPeers[p.PubKeyHex] = struct{}{}
-		}
-		if p.KumaPushURL != "" {
-			if err := validateHTTPURL(p.KumaPushURL); err != nil {
-				errs = append(errs, fmt.Errorf("peers[%d].kuma_push_url: %w", i, err))
-			}
 		}
 	}
 

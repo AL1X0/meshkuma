@@ -382,8 +382,9 @@
     }
 
     renderOnboardingChecklist(st);
-    renderHomeProbes(probes);
+    renderHomeProbes(probes, st.probe_history || {});
     renderHomePeers(peers);
+    renderHomeIncidents(st.incidents || []);
     renderTopology(st);
     if (state.activeTab === "discover" && state.activeSubTab === "managed") renderManagedProbes();
     if (state.activeTab === "friends") renderPeersList();
@@ -429,7 +430,37 @@
     applyStep("step-friends", hasFriends, 3);
   }
 
-  function renderHomeProbes(probes) {
+  function renderUptimeStrip(points, isPeer) {
+    const slots = 24;
+    const list = Array.isArray(points) ? points.slice(-slots) : [];
+    const padCount = Math.max(0, slots - list.length);
+    let barsHTML = "";
+    for (let i = 0; i < padCount; i++) {
+      barsHTML += '<span class="uptime-bar" aria-hidden="true"></span>';
+    }
+    let okCount = 0;
+    list.forEach((pt) => {
+      let cls = "is-ok";
+      if (isPeer) {
+        if (pt.state === "down") cls = "is-err";
+        else if (pt.state === "warn") cls = "is-warn";
+        else okCount++;
+      } else {
+        if (pt.ok) okCount++;
+        else cls = "is-err";
+      }
+      barsHTML += '<span class="uptime-bar ' + cls + '" aria-hidden="true"></span>';
+    });
+    const pctText = list.length ? Math.round((okCount / list.length) * 100) + "%" : "100%";
+    return (
+      '<div class="uptime-strip">' +
+      '<div class="uptime-bars">' + barsHTML + "</div>" +
+      '<span class="uptime-pct tabular">' + pctText + "</span>" +
+      "</div>"
+    );
+  }
+
+  function renderHomeProbes(probes, historyMap) {
     const tbody = $("ov-probes-body");
     if (!probes.length) {
       tbody.innerHTML =
@@ -441,11 +472,12 @@
         const cls = p.ok ? "is-ok" : "is-err";
         const label = p.ok ? "Fonctionne" : "En panne";
         const lat = p.latency_ms != null ? p.latency_ms + " ms" : "0 ms";
+        const hist = (historyMap && historyMap[p.id]) || [{ ok: p.ok }];
         return (
           "<tr>" +
-          '<td class="cell-primary">' + escapeHTML(p.id) + "</td>" +
-          "<td>" + escapeHTML(probeKindLabel(p.kind)) + "</td>" +
+          '<td><span class="cell-primary">' + escapeHTML(p.id) + '</span><span class="cell-secondary">' + escapeHTML(probeKindLabel(p.kind)) + "</span></td>" +
           '<td><span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span></td>" +
+          "<td>" + renderUptimeStrip(hist, false) + "</td>" +
           "<td>" + escapeHTML(p.summary || "") + "</td>" +
           '<td class="num-col tabular">' + escapeHTML(lat) + "</td>" +
           '<td class="num-col"><button type="button" class="inline-action" data-edit-probe-id="' + escapeHTML(p.id) + '">Modifier</button></td>' +
@@ -494,9 +526,41 @@
           "<tr>" +
           '<td><span class="cell-primary">' + escapeHTML(p.name) + "</span>" + subLine + "</td>" +
           '<td><span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span></td>" +
+          "<td>" + renderUptimeStrip(p.history || [], true) + "</td>" +
           '<td class="tabular">' + escapeHTML(formatRelativeTime(p.last_seen)) + "</td>" +
-          "<td>" + (p.kuma_push_url ? "Synchronisé" : "Non lié") + "</td>" +
           "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  function renderHomeIncidents(incidents) {
+    const band = $("incidents-band");
+    const list = $("ov-incidents-list");
+    if (!band || !list) return;
+    if (!incidents || !incidents.length) {
+      band.hidden = true;
+      return;
+    }
+    band.hidden = false;
+    $("incidents-count").textContent = incidents.length + (incidents.length > 1 ? " événements" : " événement");
+    list.innerHTML = incidents
+      .slice(0, 10)
+      .map((ev) => {
+        const cls = ev.ok ? "is-ok" : "is-err";
+        const label = ev.ok ? "Rétabli" : "Incident";
+        const when = formatRelativeTime(new Date((ev.ts || 0) * 1000).toISOString());
+        return (
+          '<div class="discover-row">' +
+          '<div class="discover-main">' +
+          '<div class="discover-title">' + escapeHTML(ev.target || "") + "</div>" +
+          '<div class="discover-sub">' + escapeHTML(ev.summary || "") + "</div>" +
+          "</div>" +
+          '<div class="discover-right">' +
+          '<span class="status-cell ' + cls + '"><span class="status-dot ' + cls + '"></span>' + label + "</span>" +
+          '<span class="band-meta tabular">' + escapeHTML(when) + "</span>" +
+          "</div>" +
+          "</div>"
         );
       })
       .join("");
@@ -1402,7 +1466,7 @@
 
     const prevConfig = deepClone(state.config);
     const name = parsed.name || "Ami " + (state.config.peers.length + 1);
-    state.config.peers.push({ name, pubkey_hex: parsed.pubkey, kuma_push_url: "" });
+    state.config.peers.push({ name, pubkey_hex: parsed.pubkey });
 
     if (parsed.psk && $("friend-join-group").checked) {
       state.config.node.group_psk_hex = parsed.psk;
@@ -1455,7 +1519,7 @@
             stateLabel = "En ligne";
           }
         }
-        const sub = (p.pubkey_hex || "").slice(0, 14) + "..." + (p.kuma_push_url ? " · Synchronisé avec Uptime Kuma" : "");
+        const sub = "Clé publique : " + (p.pubkey_hex || "").slice(0, 18) + "...";
         return (
           '<div class="discover-row">' +
           '<div class="discover-main">' +
@@ -1496,12 +1560,10 @@
       $("friend-modal-title").textContent = "Modifier " + (p.name || "cet ami");
       $("fm-name").value = p.name || "";
       $("fm-pubkey").value = p.pubkey_hex || "";
-      $("fm-kuma").value = p.kuma_push_url || "";
     } else {
       $("friend-modal-title").textContent = "Ajouter un ami manuellement";
       $("fm-name").value = "";
       $("fm-pubkey").value = "";
-      $("fm-kuma").value = "";
     }
     $("friend-modal").hidden = false;
     $("fm-name").focus();
@@ -1516,8 +1578,7 @@
     e.preventDefault();
     const entry = {
       name: $("fm-name").value.trim(),
-      pubkey_hex: $("fm-pubkey").value.trim().toLowerCase(),
-      kuma_push_url: $("fm-kuma").value.trim()
+      pubkey_hex: $("fm-pubkey").value.trim().toLowerCase()
     };
     if (!state.config.peers) state.config.peers = [];
     const prevPeers = deepClone(state.config.peers);

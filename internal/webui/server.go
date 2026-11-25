@@ -57,10 +57,12 @@ type RuntimeStatus struct {
 	OverallOK       bool                    `json:"overall_ok"`
 	Muted           bool                    `json:"muted"`
 	AutoMuteTargets []string                `json:"auto_mute_targets"`
-	Relays          []transport.RelayStatus `json:"relays"`
-	Probes          []probes.ProbeResult    `json:"probes"`
-	Peers           []quorum.PeerStatus     `json:"peers"`
-	Notifications   NotificationsStatus     `json:"notifications"`
+	Relays          []transport.RelayStatus          `json:"relays"`
+	Probes          []probes.ProbeResult             `json:"probes"`
+	ProbeHistory    map[string][]probes.HistoryPoint `json:"probe_history,omitempty"`
+	Peers           []quorum.PeerStatus              `json:"peers"`
+	Incidents       []probes.IncidentEvent           `json:"incidents,omitempty"`
+	Notifications   NotificationsStatus              `json:"notifications"`
 }
 
 // RuntimeController bridges the embedded HTTP UI to the running MeshWatch agent.
@@ -270,8 +272,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if st.Probes == nil {
 		st.Probes = []probes.ProbeResult{}
 	}
+	if st.ProbeHistory == nil {
+		st.ProbeHistory = map[string][]probes.HistoryPoint{}
+	}
 	if st.Peers == nil {
 		st.Peers = []quorum.PeerStatus{}
+	}
+	if st.Incidents == nil {
+		st.Incidents = []probes.IncidentEvent{}
 	}
 	if st.AutoMuteTargets == nil {
 		st.AutoMuteTargets = []string{}

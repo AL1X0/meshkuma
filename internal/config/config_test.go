@@ -45,7 +45,6 @@ auto_mute:
 peers:
   - name: "ami-nord"
     pubkey_hex: "%s"
-    kuma_push_url: "http://uptime-kuma:3001/api/push/XXXXXXXX"
 
 probes:
   - id: "syno-nas"

@@ -1,17 +1,6 @@
 services:
-  uptime-kuma:
-    image: louislam/uptime-kuma:2
-    container_name: meshwatch-kuma
-    restart: unless-stopped
-    volumes:
-      - ./data/kuma:/app/data
-    networks:
-      - meshwatch-net
-    # Exposer uniquement sur localhost ou via ton reverse proxy existant si besoin
-    # ports:
-    #   - "127.0.0.1:3001:3001"
-
   meshwatch:
+    image: ghcr.io/al1x0/meshkuma:latest
     build: .
     container_name: meshwatch-agent
     restart: unless-stopped
@@ -21,13 +10,11 @@ services:
     volumes:
       - ./config.yaml:/etc/meshwatch/config.yaml
       - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - meshwatch-net
-    # Si la sonde Docker ou la mise à jour en 1 clic lit /var/run/docker.sock en mode nonroot,
+    # Si la sonde Docker ou la mise à jour en 1 clic accède à /var/run/docker.sock en mode nonroot,
     # ajoute le GID du groupe docker de l'hôte (stat -c '%g' /var/run/docker.sock) :
     # group_add:
     #   - "999"
-    # Pour activer l'interface web locale de configuration (opt-in, désactivée par défaut) :
+    # Pour activer l'interface web locale (opt-in, désactivée par défaut) :
     # Décommente ports + environment ci-dessous (ne jamais exposer sur Internet sans VPN/proxy auth) :
     # ports:
     #   - "127.0.0.1:8080:8080"
@@ -35,7 +22,3 @@ services:
     #   - MESHWATCH_UI_ADDR=0.0.0.0:8080
     #   - MESHWATCH_UI_TOKEN=change-moi-par-un-jeton-secret
     command: ["run", "--config", "/etc/meshwatch/config.yaml"]
-
-networks:
-  meshwatch-net:
-    driver: bridge

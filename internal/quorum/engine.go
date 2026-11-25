@@ -31,13 +31,19 @@ type ClaimPublisher interface {
 	PublishAlertClaim(ctx context.Context, claim transport.AlertClaimPayload) (string, error)
 }
 
-// KumaBridge pushes valid peer heartbeats to a local Uptime Kuma instance.
-type KumaBridge interface {
-	Push(ctx context.Context, pushURL string, hb *transport.HeartbeatPayload, pingMs int64) error
-}
-
 // DialFunc dials a TCP endpoint (injectable for Auto-Mute unit tests).
 type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// PeerHistoryPoint records a single peer liveness/health sample for the built-in UI bar.
+type PeerHistoryPoint struct {
+	TS    int64  `json:"ts"`
+	State string `json:"state"` // "ok", "warn", or "down"
+}
+
+const (
+	maxPeerHistoryPoints = 36
+	maxPeerIncidents     = 40
+)
 
 // EngineConfig configures the quorum, Auto-Mute, and notifier election engine.
 type EngineConfig struct {
@@ -50,7 +56,6 @@ type EngineConfig struct {
 	Rank1Delay      time.Duration
 	Rank2Delay      time.Duration
 	Publisher       ClaimPublisher
-	Kuma            KumaBridge
 	Notifier        notify.Notifier
 	Dial            DialFunc
 	Now             func() time.Time
@@ -68,21 +73,22 @@ type peerState struct {
 	lastSeen    time.Time
 	probeStates map[string]bool
 	lastProbes  []probes.ProbeResult
+	history     []PeerHistoryPoint
 }
 
 // PeerStatus is a thread-safe snapshot of a peer's liveness and latest reported probes.
 type PeerStatus struct {
-	Name        string               `json:"name"`
-	NodeName    string               `json:"node_name"`
-	PubKeyHex   string               `json:"pubkey_hex"`
-	KumaPushURL string               `json:"kuma_push_url,omitempty"`
-	EverSeen    bool                 `json:"ever_seen"`
-	Online      bool                 `json:"online"`
-	TimedOut    bool                 `json:"timed_out"`
-	OverallOK   bool                 `json:"overall_ok"`
-	UptimeSec   int64                `json:"uptime_sec"`
-	LastSeen    *time.Time           `json:"last_seen,omitempty"`
-	Probes      []probes.ProbeResult `json:"probes"`
+	Name      string               `json:"name"`
+	NodeName  string               `json:"node_name"`
+	PubKeyHex string               `json:"pubkey_hex"`
+	EverSeen  bool                 `json:"ever_seen"`
+	Online    bool                 `json:"online"`
+	TimedOut  bool                 `json:"timed_out"`
+	OverallOK bool                 `json:"overall_ok"`
+	UptimeSec int64                `json:"uptime_sec"`
+	LastSeen  *time.Time           `json:"last_seen,omitempty"`
+	Probes    []probes.ProbeResult `json:"probes"`
+	History   []PeerHistoryPoint   `json:"history,omitempty"`
 }
 
 type claimRecord struct {
@@ -102,7 +108,7 @@ type pendingElection struct {
 }
 
 // Engine tracks peer liveness and probe states, enforces Auto-Mute on local WAN loss,
-// forwards heartbeats to Uptime Kuma, and elects a single notifier per incident via alert_claim.
+// records peer availability history, and elects a single notifier per incident via alert_claim.
 type Engine struct {
 	selfName        string
 	selfPubKey      string
@@ -112,18 +118,18 @@ type Engine struct {
 	rank1Delay      time.Duration
 	rank2Delay      time.Duration
 	publisher       ClaimPublisher
-	kuma            KumaBridge
 	notifier        notify.Notifier
 	dial            DialFunc
 	now             func() time.Time
 	logger          *slog.Logger
 
-	mu      sync.Mutex
-	peers   map[string]*peerState
-	muted   bool
-	claims  map[string]claimRecord
-	pending map[string]*pendingElection
-	stopped bool
+	mu        sync.Mutex
+	peers     map[string]*peerState
+	incidents []probes.IncidentEvent
+	muted     bool
+	claims    map[string]claimRecord
+	pending   map[string]*pendingElection
+	stopped   bool
 
 	wg sync.WaitGroup
 }
@@ -183,7 +189,6 @@ func NewEngine(cfg EngineConfig) *Engine {
 		rank1Delay:      rank1,
 		rank2Delay:      rank2,
 		publisher:       cfg.Publisher,
-		kuma:            cfg.Kuma,
 		notifier:        cfg.Notifier,
 		dial:            dialFn,
 		now:             nowFn,
@@ -227,18 +232,20 @@ func (e *Engine) PeerStatuses() []PeerStatus {
 		}
 		copiedProbes := make([]probes.ProbeResult, len(p.lastProbes))
 		copy(copiedProbes, p.lastProbes)
+		copiedHistory := make([]PeerHistoryPoint, len(p.history))
+		copy(copiedHistory, p.history)
 		out = append(out, PeerStatus{
-			Name:        p.cfg.Name,
-			NodeName:    p.nodeName,
-			PubKeyHex:   p.cfg.PubKeyHex,
-			KumaPushURL: p.cfg.KumaPushURL,
-			EverSeen:    p.everSeen,
-			Online:      p.online,
-			TimedOut:    p.timedOut,
-			OverallOK:   p.overallOK,
-			UptimeSec:   p.uptimeSec,
-			LastSeen:    lastSeenPtr,
-			Probes:      copiedProbes,
+			Name:      p.cfg.Name,
+			NodeName:  p.nodeName,
+			PubKeyHex: p.cfg.PubKeyHex,
+			EverSeen:  p.everSeen,
+			Online:    p.online,
+			TimedOut:  p.timedOut,
+			OverallOK: p.overallOK,
+			UptimeSec: p.uptimeSec,
+			LastSeen:  lastSeenPtr,
+			Probes:    copiedProbes,
+			History:   copiedHistory,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -248,6 +255,38 @@ func (e *Engine) PeerStatuses() []PeerStatus {
 		return out[i].PubKeyHex < out[j].PubKeyHex
 	})
 	return out
+}
+
+// Incidents returns recent peer outages and recoveries (newest first).
+func (e *Engine) Incidents() []probes.IncidentEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	out := make([]probes.IncidentEvent, len(e.incidents))
+	for i := range e.incidents {
+		out[i] = e.incidents[len(e.incidents)-1-i]
+	}
+	return out
+}
+
+func (e *Engine) recordIncidentLocked(ts int64, target string, ok bool, summary string) {
+	e.incidents = append(e.incidents, probes.IncidentEvent{
+		TS:      ts,
+		Source:  "peer",
+		Target:  target,
+		OK:      ok,
+		Summary: summary,
+	})
+	if len(e.incidents) > maxPeerIncidents {
+		e.incidents = e.incidents[len(e.incidents)-maxPeerIncidents:]
+	}
+}
+
+func appendPeerHistoryLocked(p *peerState, ts int64, state string) {
+	p.history = append(p.history, PeerHistoryPoint{TS: ts, State: state})
+	if len(p.history) > maxPeerHistoryPoints {
+		p.history = p.history[len(p.history)-maxPeerHistoryPoints:]
+	}
 }
 
 // CheckAutoMute verifies outbound WAN connectivity via TCP Dial (default 3s timeout)
@@ -348,10 +387,17 @@ func (e *Engine) handleHeartbeat(ctx context.Context, msg transport.IncomingMess
 	peer.lastSeen = now
 	peer.lastProbes = append([]probes.ProbeResult(nil), hb.Probes...)
 
+	histState := "ok"
+	if !hb.OverallOK {
+		histState = "warn"
+	}
+	appendPeerHistoryLocked(peer, now.Unix(), histState)
+
 	var alertsToSchedule []notify.Alert
 
 	// Peer recovered from a timeout.
 	if wasTimedOut {
+		e.recordIncidentLocked(now.Unix(), peer.cfg.Name, true, "Connexion rétablie")
 		bucket := timestampBucket60(now)
 		alertsToSchedule = append(alertsToSchedule, notify.Alert{
 			IncidentID:   fmt.Sprintf("resolved:%s:%d", pk, bucket),
@@ -378,6 +424,7 @@ func (e *Engine) handleHeartbeat(ctx context.Context, msg transport.IncomingMess
 			if summary == "" {
 				summary = "probe check failed"
 			}
+			e.recordIncidentLocked(now.Unix(), peer.cfg.Name+" · "+pr.ID, false, summary)
 			alertsToSchedule = append(alertsToSchedule, notify.Alert{
 				IncidentID:   fmt.Sprintf("%s:%s:%d", pk, pr.ID, bucket),
 				State:        notify.StateDown,
@@ -394,6 +441,7 @@ func (e *Engine) handleHeartbeat(ctx context.Context, msg transport.IncomingMess
 			if summary == "" {
 				summary = "probe check OK"
 			}
+			e.recordIncidentLocked(now.Unix(), peer.cfg.Name+" · "+pr.ID, true, summary)
 			alertsToSchedule = append(alertsToSchedule, notify.Alert{
 				IncidentID:   fmt.Sprintf("resolved:%s:%s:%d", pk, pr.ID, bucket),
 				State:        notify.StateResolved,
@@ -408,19 +456,7 @@ func (e *Engine) handleHeartbeat(ctx context.Context, msg transport.IncomingMess
 		}
 	}
 
-	kumaURL := peer.cfg.KumaPushURL
 	e.mu.Unlock()
-
-	// Forward heartbeat to local Uptime Kuma push monitor if configured.
-	if e.kuma != nil && kumaURL != "" {
-		pingMs := now.Sub(msg.CreatedAt).Milliseconds()
-		if pingMs < 0 {
-			pingMs = 0
-		}
-		if err := e.kuma.Push(ctx, kumaURL, hb, pingMs); err != nil {
-			e.logger.Warn("uptime kuma push failed", "peer", peer.nodeName, "err", err)
-		}
-	}
 
 	// Schedule elected alerts (checking Auto-Mute before alerting).
 	if len(alertsToSchedule) > 0 {
@@ -504,6 +540,8 @@ func (e *Engine) CheckTimeouts(ctx context.Context) {
 		peer.online = false
 		peer.timedOut = true
 		silentFor := now.Sub(peer.lastSeen).Round(time.Second)
+		appendPeerHistoryLocked(peer, now.Unix(), "down")
+		e.recordIncidentLocked(now.Unix(), peer.cfg.Name, false, fmt.Sprintf("Hors ligne depuis %s", silentFor))
 		bucket := timestampBucket60(now)
 		alerts = append(alerts, notify.Alert{
 			IncidentID:   fmt.Sprintf("%s:%d", pk, bucket),

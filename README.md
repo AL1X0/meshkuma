@@ -1,7 +1,7 @@
 <div align="center">
 
 <picture>
-  <img src="assets/banner.svg" alt="MeshWatch — Supervision Mesh P2P sur Nostr & Uptime Kuma" width="100%">
+  <img src="assets/banner.svg" alt="MeshWatch — Supervision Mesh P2P décentralisée sur Nostr" width="100%">
 </picture>
 
 <br/>
@@ -22,26 +22,27 @@
 
 ## Pourquoi MeshWatch ?
 
-Quand votre fibre tombe ou que votre serveur domestique plante, **votre propre Uptime Kuma local tombe avec lui** et ne peut plus vous prévenir. Louer un VPS juste pour monitorer son homelab ajoute un coût, de la maintenance et un point central.
+Quand votre fibre tombe ou que votre serveur domestique plante, **votre propre outil de supervision local tombe avec lui** et ne peut plus vous prévenir. Louer un VPS juste pour monitorer son homelab ajoute un coût, de la maintenance et un point central.
 
-**MeshWatch** résout ce problème en créant un **maillage P2P de supervision entre amis** :
+**MeshWatch** résout ce problème en créant un **maillage P2P de supervision 100 % autonome entre amis** :
 
-- Chacun héberge un petit conteneur Docker Go (**11,3 Mo**, `< 30 Mo` de RAM) dans son propre LAN.
-- Chaque agent exécute **localement** ses sondes (Synology SNMP, Docker, Linux `node_exporter`, Windows `windows_exporter`, HTTP/TLS, TCP, SNMP générique).
+- Chacun héberge **un seul conteneur Docker Go** (**11,5 Mo**, `~11 Mo` de RAM) dans son propre LAN — aucune base de données externe, aucun outil tiers à maintenir.
+- Chaque agent exécute **localement** ses sondes (Synology SNMP, Docker, Linux `node_exporter`, Windows `windows_exporter`, HTTP/TLS, TCP, SNMP générique) et conserve un **historique de disponibilité + journal des incidents intégré**.
 - Il publie périodiquement un résumé JSON **chiffré en AES-256-GCM** via des **relais Nostr publics** (`kind: 24242`, éphémères, jamais stockés sur disque).
-- Les pairs abonnés reçoivent ces heartbeats, alimentent leur **Uptime Kuma local (Push / Dead Man's Switch)**, et élisent automatiquement **un seul notificateur** (`ntfy` / **Photon iMessage**) en cas de panne — fini les tempêtes d'alertes !
+- Les pairs abonnés reçoivent ces heartbeats, affichent la santé et la disponibilité de chaque ami dans leur interface, et élisent automatiquement **un seul notificateur** (`ntfy` / **Photon iMessage**) en cas de panne — fini les tempêtes d'alertes !
 
 ---
 
 ## Console Web locale (opt-in)
 
-Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch embarque (`//go:embed`) une **console simple et orientée utilisateur** activable en local via `--ui 127.0.0.1:8080` :
+Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch embarque (`//go:embed`) une **interface simple, guidée et 100 % pilotable au clic** (zéro fichier YAML à éditer) activable en local via `--ui 127.0.0.1:8080` :
 
-- **Accueil clair sans jargon** : état immédiat de votre maison, topologie visuelle en direct et santé de vos amis.
+- **Accueil clair & historique intégré** : état immédiat de vos services, barres de disponibilité temps réel, topologie visuelle en direct, santé de vos amis et journal d'activité récente.
 - **Découverte Docker en 1 clic** : lit `/var/run/docker.sock` pour lister tous les conteneurs de la machine hôte et les cocher/décocher par simple interrupteur.
-- **Scanner de réseau local (RFC1918)** : détecte automatiquement sur votre LAN vos NAS Synology, serveurs Linux/Windows et applications web locales (Jellyfin, Immich, Proxmox, Home Assistant, Uptime Kuma…) et propose de les surveiller en un clic.
-- **Mise à jour directe depuis l'interface** : vérifie automatiquement les nouvelles versions sur GitHub et affiche un bouton **Mettre à jour maintenant** (téléchargement de l'image GHCR + remplacement sécurisé du conteneur avec rollback automatique).
-- **Thème clair / sombre**, interface mobile responsive, protection par jeton Bearer (`--ui-token`), et options avancées (relais Nostr, clés, YAML) rangées discrètement dans **Réglages**.
+- **Scanner de réseau local (RFC1918) avec barre de recherche** : détecte automatiquement sur votre LAN vos NAS Synology, serveurs Linux/Windows et applications web locales (Jellyfin, Immich, Proxmox, Home Assistant…) et propose de les surveiller en un clic.
+- **Invitations amis en 1 copier-coller (`MW1-...`)** : partagez un seul code d'invitation regroupant nom, clé publique et secret du groupe — zéro manipulation manuelle de clés hexadécimales.
+- **Alertes guidées (`ntfy` + Photon Cloud / HTTP Proxy)** : génération automatique d'un canal privé `ntfy`, support officiel de Photon Cloud (`api.photon.codes/v1`) et Photon HTTP Proxy (`imessage-swagger.photon.codes`), et bouton de test direct.
+- **Mise à jour en un clic** : attend que le build CI/GHCR soit réellement publié, télécharge le tag exact et remplace le conteneur en sécurité avec rollback automatique.
 
 ### Vue d'ensemble (avec alerte de mise à jour intégrée)
 
@@ -79,7 +80,7 @@ Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch 
 meshwatch run --config config.yaml --ui 127.0.0.1:8080 --ui-token "mon-jeton-local"
 ```
 
-Avec Docker Compose, décommentez `ports` (`127.0.0.1:8080:8080`) et `MESHWATCH_UI_ADDR` / `MESHWATCH_UI_TOKEN` dans [docker-compose.yml](docker-compose.yml) (retirez `:ro` sur `config.yaml` pour sauvegarder directement depuis la console, ou téléchargez le fichier depuis l'onglet **YAML**).
+Avec Docker Compose, décommentez `ports` (`127.0.0.1:8080:8080`) et `MESHWATCH_UI_ADDR` / `MESHWATCH_UI_TOKEN` dans [docker-compose.yml](docker-compose.yml) : toutes vos modifications s'enregistrent et s'activent automatiquement depuis le navigateur.
 
 ---
 
@@ -94,25 +95,23 @@ flowchart LR
         WIN["Serveur Windows<br/>windows_exporter"]
         WEB["Services HTTP / TLS / TCP"]
 
-        AGENT["MeshWatch Agent<br/>(Go · distroless 11.3 MB)"]
-        KUMA["Uptime Kuma<br/>(Push / Dead Man's Switch)"]
+        AGENT["MeshWatch Agent<br/>(Go · distroless 11.5 MB<br/>Interface Web & Historique intégrés)"]
 
         SYNO --> AGENT
         DOCK --> AGENT
         LIN --> AGENT
         WIN --> AGENT
         WEB --> AGENT
-        AGENT -->|"GET /api/push?status=up|down"| KUMA
     end
 
     subgraph WAN["Internet (100 % trafic sortant — WSS 443 / HTTPS)"]
-        RELAYS(("Relais Nostr publics<br/>x3-4 · kind 24242<br/>AES-256-GCM"))
+        RELAYS(("Relais Nostr publics<br/>x3 · kind 24242<br/>AES-256-GCM"))
         ALERTS["Alertes<br/>ntfy · Photon iMessage"]
     end
 
-    subgraph PEERS["Pairs de confiance (Pote A / B / C)"]
-        PEER_A["MeshWatch Pote A<br/>Rang 0 (immédiat)"]
-        PEER_B["MeshWatch Pote B<br/>Rang 1 (fallback 15s)"]
+    subgraph PEERS["Pairs de confiance (Ami A / B / C)"]
+        PEER_A["MeshWatch Ami A<br/>Rang 0 (immédiat)"]
+        PEER_B["MeshWatch Ami B<br/>Rang 1 (fallback 15s)"]
     end
 
     AGENT ==>|"WSS 443 sortant"| RELAYS
@@ -129,14 +128,13 @@ flowchart LR
 | Capacité | Description |
 | :--- | :--- |
 | **Zéro port entrant** | 100 % du trafic WAN est sortant (`WSS 443` vers les relais Nostr, `HTTPS` vers `ntfy`/Photon). Aucune règle NAT/pare-feu à ouvrir. |
+| **100 % autonome (1 conteneur)** | Interface web embarquée, découverte Docker & LAN, barres d'historique de disponibilité et journal d'incidents intégrés — aucun serveur tiers requis. |
 | **Isolation stricte du LAN** | Un pair distant ne peut jamais scanner votre LAN ni exécuter de sonde chez vous : seuls des résumés d'état JSON chiffrés sortent. |
 | **Chiffrement E2E & Anti-Rejeu** | Dérivation `HKDF-SHA256`, `AES-256-GCM` (nonce 12 octets), tag de routage `#t` opaque, signatures Schnorr vérifiées, whitelist `peers`, fenêtre `±60s` et déduplication multi-relais. |
 | **Auto-Mute (protection coupure fibre)** | Vérifie la connectivité WAN par dial TCP (`1.1.1.1:443`, `9.9.9.9:443`, timeout 3 s) avant toute alerte. Si votre connexion locale tombe, le nœud se met en sourdine (`muted = true`) pour éviter tout faux positif. |
 | **Quorum Anti-Alert Storm** | Élection déterministe par ordre lexicographique des `pubkey` en ligne + `alert_claim` sur Nostr : **Rang 0** notifie immédiatement, **Rang 1** attend `15s` en failover, **Rang ≥ 2** attend `30s`. Même logique pour les `RESOLVED`. |
-| **Pont Uptime Kuma natif** | Transmet chaque heartbeat valide (`status=up/down`, détail de la sonde fautive dans `msg`, `ping`). Si un pair s'éteint, le Dead Man's Switch d'Uptime Kuma bascule automatiquement en rouge. |
-| **Console web opt-in (`--ui`)** | Interface locale embarquée (`//go:embed`) avec topologie SVG temps réel, éditeur visuel de sondes/pairs/alertes, `keygen`, `test-notify`, mode initialisation et hot-reload. |
-| **Alertes `ntfy` & Photon iMessage** | Formatage clair (nœud, sonde, résumé, horodatage UTC) avec 3 retries exponentiels (`2s`, `5s`, `10s`) sur erreurs réseau / 5xx et commande `test-notify`. |
-| **Empreinte minimale** | Binaire Go statique (`CGO_ENABLED=0`), image `gcr.io/distroless/static-debian12:nonroot` de **11,3 Mo**, système de fichiers en lecture seule (`read_only: true`). |
+| **Alertes `ntfy` & Photon iMessage** | Formatage clair (nœud, sonde, résumé, horodatage UTC) avec 3 retries exponentiels (`2s`, `5s`, `10s`), support officiel Photon Cloud (`api.photon.codes/v1`) et Photon HTTP Proxy (`imessage-swagger.photon.codes`). |
+| **Empreinte minimale** | Binaire Go statique (`CGO_ENABLED=0`), image `gcr.io/distroless/static-debian12:nonroot` de **11,5 Mo**, système de fichiers en lecture seule (`read_only: true`). |
 
 ---
 
@@ -146,7 +144,7 @@ Toutes les sondes tournent de manière concurrente sur leur propre `time.Ticker`
 
 | Type (`kind`) | Protocole / Source | Ce qui est vérifié |
 | :--- | :--- | :--- |
-| `synology` | SNMPv2c & SNMPv3 (`gosnmp`) | État système (`.6574.1.1.0`), température (`.6574.1.2.0`, seuil `max_temp_c`), ventilateurs système/alim (`.6574.1.4.1.0`, `.2.0`), walk RAID (`.6574.3.1.1.4`) et walk Disques (`.6574.2.1.1.5`). |
+| `synology` | SNMPv2c & SNMPv3 (`gosnmp`) | État système (`.6574.1.1.0`), température (`.6574.1.2.0`, seuil `max_temp_c`), ventilateurs système/alim (`.6574.1.4.1.0`, `.2.0`), walk RAID (`.6574.3.1.1.3`) et walk Disques (`.6574.2.1.1.5`). |
 | `docker` | Unix socket ou `tcp://docker-socket-proxy:2375` | Conteneurs nommés ou filtrés par label (`meshwatch.enable=true`), état `running`, healthcheck `unhealthy` et seuil `max_restarts`. Client HTTP natif léger (sans SDK Docker lourd). |
 | `node_exporter` | HTTP `/metrics` (Linux) | % utilisation RAM (`max_ram_percent`) et % occupation des disques réels (`max_disk_percent`, ignore automatiquement `tmpfs`/`overlay`/`proc`…). |
 | `windows_exporter` | HTTP `/metrics` (Windows) | % utilisation RAM, % disques logiques (`C:`, etc.) et état temps réel des services Windows configurés (`windows_service_state{state="running"} == 1`). |
@@ -195,7 +193,7 @@ chmod 600 config.yaml
 
 Complétez [config.example.yaml](config.example.yaml) (ou configurez-le visuellement via `--ui 127.0.0.1:8080`) avec :
 - Votre `node.name`, votre `private_key_hex` et le `group_psk_hex` du groupe.
-- La liste `peers` avec le nom, la `pubkey_hex` de chaque ami et *(optionnel)* l'URL Push créée dans votre **Uptime Kuma** local (`http://uptime-kuma:3001/api/push/<TOKEN>`).
+- La liste `peers` avec le nom et la `pubkey_hex` de chaque ami (ou directement en 1 clic via le code d'invitation `MW1-...` dans l'onglet **Mes amis**).
 - Vos sondes locales (`probes`) et vos canaux d'alerte (`notifications.ntfy` / `notifications.photon_imessage`).
 
 > **Note sur `/var/run/docker.sock` en mode `nonroot`**  
@@ -280,13 +278,14 @@ docker images meshwatch:latest
 │   ├── config/             # Parsing YAML strict & validation
 │   ├── crypto/             # HKDF-SHA256, AES-256-GCM, dérivation #t & keygen
 │   ├── transport/          # Pool Nostr multi-relais WSS, reconnexion auto, anti-rejeu, dédup
-│   ├── probes/             # Scheduler concurrent + sondes HTTP/TLS, TCP, Docker, Synology, SNMP, Exporters
-│   ├── quorum/             # Auto-Mute WAN, suivi des pairs, élection du notificateur (alert_claim)
-│   ├── kuma/               # Client HTTP Push vers Uptime Kuma
-│   ├── notify/             # Connecteurs ntfy & Photon iMessage avec retry exponentiel
-│   └── webui/              # Console web locale opt-in (API REST + assets //go:embed)
+│   ├── probes/             # Scheduler concurrent, historique intégré + sondes locales
+│   ├── quorum/             # Auto-Mute WAN, suivi des pairs, historique, élection (alert_claim)
+│   ├── discover/           # Découverte Docker (/var/run/docker.sock) & scanner LAN RFC1918
+│   ├── updater/            # Vérification CI/GHCR & mise à jour Docker en 1 clic avec rollback
+│   ├── notify/             # Connecteurs ntfy & Photon iMessage (Cloud / Proxy / Webhook)
+│   └── webui/              # Interface web locale opt-in (API REST + assets //go:embed)
 ├── Dockerfile              # Multi-stage golang:1.23-alpine → distroless/static-debian12:nonroot
-├── docker-compose.yml      # Stack Uptime Kuma + MeshWatch (read_only, no-new-privileges)
+├── docker-compose.yml      # Conteneur MeshWatch autonome (read_only, no-new-privileges)
 ├── config.example.yaml     # Exemple complet de configuration
 └── SPEC.md                 # Spécification technique détaillée
 ```

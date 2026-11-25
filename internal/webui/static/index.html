@@ -122,11 +122,6 @@
         <span class="field-label">Identifiant public de l'ami</span>
         <input id="fm-pubkey" type="text" class="mono" placeholder="Clé publique (64 caractères)" required>
       </label>
-      <label class="field">
-        <span class="field-label">Lien Uptime Kuma (optionnel)</span>
-        <input id="fm-kuma" type="url" class="mono" placeholder="http://uptime-kuma:3001/api/push/...">
-        <span class="field-hint">Permet d'afficher aussi l'état de cet ami dans votre tableau Uptime Kuma.</span>
-      </label>
       <div class="modal-actions">
         <button type="button" id="friend-modal-cancel" class="btn-secondary">Annuler</button>
         <button type="submit" id="friend-modal-save" class="btn-primary">Enregistrer</button>
@@ -282,8 +277,8 @@
             <thead>
               <tr>
                 <th>Service</th>
-                <th>Type</th>
                 <th>État</th>
+                <th>Historique</th>
                 <th>Détail</th>
                 <th class="num-col">Réponse</th>
                 <th class="num-col">Action</th>
@@ -305,13 +300,21 @@
               <tr>
                 <th>Ami</th>
                 <th>État</th>
+                <th>Disponibilité</th>
                 <th>Dernières nouvelles</th>
-                <th>Uptime Kuma</th>
               </tr>
             </thead>
             <tbody id="ov-peers-body"></tbody>
           </table>
         </div>
+      </section>
+
+      <section class="band" id="incidents-band" hidden>
+        <div class="band-head">
+          <h2>Activité récente</h2>
+          <span class="band-meta" id="incidents-count"></span>
+        </div>
+        <div id="ov-incidents-list" class="discover-list"></div>
       </section>
     </section>
 

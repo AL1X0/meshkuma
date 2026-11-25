@@ -729,6 +729,47 @@ html[data-theme="dark"] .step-marker {
   padding: 32px 20px !important;
 }
 
+/* Built-in uptime spark-bars */
+.uptime-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.uptime-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 18px;
+}
+
+.uptime-bar {
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background-color: var(--border-strong);
+}
+
+.uptime-bar.is-ok {
+  background-color: var(--ok);
+}
+
+.uptime-bar.is-warn {
+  background-color: var(--warn);
+}
+
+.uptime-bar.is-err {
+  background-color: var(--err);
+}
+
+.uptime-pct {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 44px;
+  text-align: right;
+}
+
 /* Discovery scan bar & list */
 .scan-bar {
   margin-top: 22px;

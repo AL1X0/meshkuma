@@ -46,9 +46,8 @@ type AutoMuteDTO struct {
 }
 
 type PeerDTO struct {
-	Name        string `json:"name" yaml:"name"`
-	PubKeyHex   string `json:"pubkey_hex" yaml:"pubkey_hex"`
-	KumaPushURL string `json:"kuma_push_url,omitempty" yaml:"kuma_push_url,omitempty"`
+	Name      string `json:"name" yaml:"name"`
+	PubKeyHex string `json:"pubkey_hex" yaml:"pubkey_hex"`
 }
 
 type ProbeDTO struct {
@@ -131,9 +130,8 @@ func configToDTO(cfg *config.Config) ConfigDTO {
 	peers := make([]PeerDTO, 0, len(cfg.Peers))
 	for _, p := range cfg.Peers {
 		peers = append(peers, PeerDTO{
-			Name:        p.Name,
-			PubKeyHex:   p.PubKeyHex,
-			KumaPushURL: p.KumaPushURL,
+			Name:      p.Name,
+			PubKeyHex: p.PubKeyHex,
 		})
 	}
 
@@ -250,9 +248,8 @@ func cleanDTO(in ConfigDTO) ConfigDTO {
 	cleanedPeers := make([]PeerDTO, 0, len(out.Peers))
 	for _, p := range out.Peers {
 		cleanedPeers = append(cleanedPeers, PeerDTO{
-			Name:        strings.TrimSpace(p.Name),
-			PubKeyHex:   strings.TrimSpace(p.PubKeyHex),
-			KumaPushURL: strings.TrimSpace(p.KumaPushURL),
+			Name:      strings.TrimSpace(p.Name),
+			PubKeyHex: strings.TrimSpace(p.PubKeyHex),
 		})
 	}
 	out.Peers = cleanedPeers
