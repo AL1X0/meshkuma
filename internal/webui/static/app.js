@@ -26,6 +26,7 @@
     dockerScannedOnce: false,
     dockerSocket: "/var/run/docker.sock",
     lanItems: [],
+    lanScanSummary: "",
     updateInfo: null,
     pollHandle: null
   };
@@ -579,7 +580,7 @@
       }
       state.lanItems = data.items || [];
       const sec = ((data.duration_ms || 0) / 1000).toFixed(1);
-      meta.textContent =
+      state.lanScanSummary =
         state.lanItems.length +
         " service(s) détecté(s) sur " +
         data.subnet +
@@ -588,6 +589,7 @@
         " adresses vérifiées en " +
         sec +
         "s).";
+      meta.textContent = state.lanScanSummary;
       renderLANResults();
     } catch (err) {
       meta.textContent = "Erreur lors du scan réseau : " + err.message;
@@ -599,14 +601,47 @@
 
   function renderLANResults() {
     const list = $("lan-results-list");
+    const meta = $("lan-scan-meta");
     if (!state.lanItems.length) {
-      list.innerHTML =
-        '<div class="editor-empty">Aucun appareil détecté sur cette plage. Vérifiez le sous-réseau (ex. 192.168.1.0/24 ou 192.168.0.0/24).</div>';
+      if (state.lanScanSummary) {
+        list.innerHTML =
+          '<div class="editor-empty">Aucun appareil détecté sur cette plage. Vérifiez le sous-réseau (ex. 192.168.1.0/24 ou 192.168.0.0/24).</div>';
+      }
       return;
     }
 
-    list.innerHTML = state.lanItems
-      .map((item, idx) => {
+    const query = ($("lan-filter-input").value || "").trim().toLowerCase();
+    const filtered = state.lanItems
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => {
+        if (!query) return true;
+        const haystack = [
+          item.name,
+          item.ip,
+          item.category,
+          item.category_label,
+          item.summary,
+          item.port != null ? String(item.port) : "",
+          item.suggested_probe && item.suggested_probe.url ? item.suggested_probe.url : ""
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(query);
+      });
+
+    if (state.lanScanSummary) {
+      meta.textContent = query
+        ? filtered.length + " sur " + state.lanItems.length + " service(s) affiché(s) · " + state.lanScanSummary
+        : state.lanScanSummary;
+    }
+
+    if (!filtered.length) {
+      list.innerHTML = '<div class="editor-empty">Aucun appareil ne correspond à votre recherche.</div>';
+      return;
+    }
+
+    list.innerHTML = filtered
+      .map(({ item, idx }) => {
         const actionHTML = item.already_monitored
           ? '<span class="status-cell is-ok"><span class="status-dot is-ok"></span>Déjà surveillé</span>'
           : '<button type="button" class="btn-primary" data-add-discovered="' + idx + '">Surveiller</button>';
@@ -1345,6 +1380,13 @@
     });
 
     $("scan-lan-btn").addEventListener("click", runLANScan);
+    $("lan-filter-input").addEventListener("input", renderLANResults);
+    $("lan-subnet-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runLANScan();
+      }
+    });
 
     $("check-update-btn").addEventListener("click", () => checkUpdates(true));
     $("update-now-btn").addEventListener("click", triggerUpdate);

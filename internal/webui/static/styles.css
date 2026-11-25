@@ -635,6 +635,12 @@ body {
   min-width: 0;
 }
 
+.scan-bar-inputs-split {
+  display: grid;
+  grid-template-columns: minmax(190px, 260px) minmax(0, 1fr);
+  gap: 16px;
+}
+
 .scan-bar-actions {
   display: inline-flex;
   align-items: center;
@@ -1222,7 +1228,8 @@ textarea {
   }
 
   .form-grid.two-col,
-  .form-grid.three-col {
+  .form-grid.three-col,
+  .scan-bar-inputs-split {
     grid-template-columns: 1fr;
   }
 

@@ -219,10 +219,14 @@
       <!-- SUBTAB B: LAN SCAN -->
       <div class="sub-panel" data-subpanel="lan" hidden>
         <div class="scan-bar">
-          <div class="scan-bar-inputs">
+          <div class="scan-bar-inputs scan-bar-inputs-split">
             <label class="field">
               <span class="field-label">Plage de votre réseau local</span>
               <input id="lan-subnet-input" type="text" class="mono" placeholder="192.168.1.0/24">
+            </label>
+            <label class="field">
+              <span class="field-label">Rechercher un appareil ou service</span>
+              <input id="lan-filter-input" type="text" placeholder="Ex. synology, 192.168.1.20, jellyfin...">
             </label>
           </div>
           <div class="scan-bar-actions">
