@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MeshWatch Console</title>
+  <title>MeshWatch</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -19,15 +19,23 @@
         </svg>
         <span class="brand-wordmark">MeshWatch</span>
       </div>
-      <h1>Accès protégé par jeton</h1>
-      <p class="muted-copy">Saisissez le jeton défini avec <code>--ui-token</code> pour accéder à la console locale de configuration.</p>
+      <h1>Connexion à votre console</h1>
+      <p class="muted-copy">Entrez votre code d'accès local pour consulter et configurer votre supervision.</p>
       <label class="field">
-        <span class="field-label">Jeton d'accès</span>
-        <input id="auth-token-input" type="password" autocomplete="current-password" placeholder="Votre jeton local" required>
+        <span class="field-label">Code d'accès</span>
+        <input id="auth-token-input" type="password" autocomplete="current-password" placeholder="Collez votre jeton local" required>
       </label>
       <p id="auth-error" class="inline-error" hidden></p>
-      <button type="submit" class="btn-primary">Déverrouiller</button>
+      <button type="submit" class="btn-primary">Ouvrir MeshWatch</button>
     </form>
+  </div>
+
+  <div id="updating-overlay" class="auth-gate" hidden>
+    <div class="auth-sheet">
+      <h1>Mise à jour en cours</h1>
+      <p id="updating-message" class="muted-copy">Téléchargement de la nouvelle version et redémarrage sécurisé du conteneur. Cette page se reconnectera automatiquement.</p>
+      <div class="progress-rail" aria-hidden="true"><div class="progress-bar"></div></div>
+    </div>
   </div>
 
   <header class="topbar" id="topbar">
@@ -40,23 +48,23 @@
         <span class="brand-wordmark">MeshWatch</span>
       </div>
 
-      <nav class="nav-tabs" role="tablist" aria-label="Sections de configuration">
-        <button type="button" class="nav-tab is-active" role="tab" aria-selected="true" data-tab="overview">Vue d'ensemble</button>
-        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="probes">Sondes</button>
-        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="peers">Pairs et Kuma</button>
-        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="network">Alertes et réseau</button>
-        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="yaml">YAML</button>
+      <nav class="nav-tabs" role="tablist" aria-label="Navigation principale">
+        <button type="button" class="nav-tab is-active" role="tab" aria-selected="true" data-tab="home">Accueil</button>
+        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="discover">Découvrir</button>
+        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="friends">Mes amis</button>
+        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="alerts">Alertes</button>
+        <button type="button" class="nav-tab" role="tab" aria-selected="false" data-tab="settings">Réglages</button>
       </nav>
 
       <div class="topbar-actions">
         <div class="theme-switch" role="radiogroup" aria-label="Apparence">
-          <button type="button" class="theme-opt is-active" data-theme-choice="light" aria-checked="true" role="radio" title="Thème clair">
+          <button type="button" class="theme-opt is-active" data-theme-choice="light" aria-checked="true" role="radio" title="Mode clair">
             <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
               <circle cx="10" cy="10" r="3.5" stroke="currentColor" stroke-width="1.6"/>
               <path d="M10 2.5V4.5M10 15.5V17.5M2.5 10H4.5M15.5 10H17.5M4.7 4.7L6.1 6.1M13.9 13.9L15.3 15.3M15.3 4.7L13.9 6.1M6.1 13.9L4.7 15.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
             </svg>
           </button>
-          <button type="button" class="theme-opt" data-theme-choice="dark" aria-checked="false" role="radio" title="Thème sombre">
+          <button type="button" class="theme-opt" data-theme-choice="dark" aria-checked="false" role="radio" title="Mode sombre">
             <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
               <path d="M16.2 12.6A6.5 6.5 0 0 1 7.4 3.8a6.8 6.8 0 1 0 8.8 8.8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
             </svg>
@@ -71,74 +79,81 @@
   <main class="workspace" id="workspace">
     <div id="feedback-bar" class="feedback-bar" role="status" aria-live="polite" hidden></div>
 
-    <div id="setup-notice" class="setup-notice" hidden>
-      <div>
-        <h2>Configuration initiale requise</h2>
-        <p id="setup-notice-detail" class="muted-copy"></p>
+    <div id="update-banner" class="update-banner" hidden>
+      <div class="update-banner-copy">
+        <h2 id="update-banner-title">Une nouvelle version de MeshWatch est disponible</h2>
+        <p id="update-banner-desc" class="muted-copy"></p>
       </div>
-      <button type="button" id="quick-setup-btn" class="btn-primary">Générer les clés</button>
+      <div class="update-banner-actions">
+        <button type="button" id="update-now-btn" class="btn-primary">Mettre à jour maintenant</button>
+      </div>
     </div>
 
-    <!-- TAB 1: OVERVIEW -->
-    <section class="view-panel is-active" id="view-overview" data-panel="overview">
+    <div id="setup-notice" class="setup-notice" hidden>
+      <div>
+        <h2>Bienvenue sur MeshWatch</h2>
+        <p id="setup-notice-detail" class="muted-copy">Créez votre identité en un clic pour commencer à surveiller vos appareils et inviter vos amis.</p>
+      </div>
+      <button type="button" id="quick-setup-btn" class="btn-primary">Créer mon identité</button>
+    </div>
+
+    <!-- TAB 1: ACCUEIL -->
+    <section class="view-panel is-active" id="view-home" data-panel="home">
       <div class="page-head">
         <div>
-          <h1 id="ov-node-name">MeshWatch</h1>
-          <p class="muted-copy" id="ov-subtitle">Supervision P2P sur Nostr sans port entrant.</p>
+          <h1 id="ov-headline">Chargement de votre réseau</h1>
+          <p class="muted-copy" id="ov-subtitle">Supervision privée de votre maison et de vos amis, sans aucun port ouvert sur Internet.</p>
         </div>
-        <div class="head-status" id="ov-global-status">
-          <span class="status-dot" id="ov-status-dot"></span>
-          <span id="ov-status-text">Chargement</span>
-        </div>
+        <button type="button" class="btn-primary" data-goto="discover">Ajouter un appareil</button>
       </div>
 
-      <div class="metrics-strip" aria-label="État synthétique du nœud">
+      <div class="metrics-strip" aria-label="Résumé de santé">
         <div class="metric-cell">
-          <span class="metric-label">Sondes locales</span>
+          <span class="metric-label">Chez vous</span>
           <span class="metric-value tabular" id="metric-probes">0 / 0</span>
-          <span class="metric-sub" id="metric-probes-sub">Aucune sonde configurée</span>
+          <span class="metric-sub" id="metric-probes-sub">Aucun service surveillé</span>
         </div>
         <div class="metric-cell">
-          <span class="metric-label">Pairs en ligne</span>
+          <span class="metric-label">Amis connectés</span>
           <span class="metric-value tabular" id="metric-peers">0 / 0</span>
-          <span class="metric-sub" id="metric-peers-sub">En attente de signal</span>
+          <span class="metric-sub" id="metric-peers-sub">Invitez un ami pour commencer</span>
         </div>
         <div class="metric-cell">
-          <span class="metric-label">Relais Nostr</span>
+          <span class="metric-label">Liaison réseau</span>
           <span class="metric-value tabular" id="metric-relays">0 / 0</span>
-          <span class="metric-sub mono-inline" id="metric-topic">Tag #t en attente</span>
+          <span class="metric-sub" id="metric-relays-sub">Relais chiffrés actifs</span>
         </div>
         <div class="metric-cell">
-          <span class="metric-label">Protection WAN</span>
-          <span class="metric-value" id="metric-wan">Actif</span>
-          <button type="button" id="check-wan-btn" class="inline-action">Vérifier maintenant</button>
+          <span class="metric-label">Connexion Internet</span>
+          <span class="metric-value" id="metric-wan">Connectée</span>
+          <button type="button" id="check-wan-btn" class="inline-action">Tester maintenant</button>
         </div>
       </div>
 
       <section class="band">
         <div class="band-head">
-          <h2>Topologie du maillage</h2>
-          <span class="band-meta tabular" id="ov-uptime">Disponibilité locale : 0s</span>
+          <h2>Votre réseau d'entraide</h2>
+          <span class="band-meta tabular" id="ov-uptime">En marche depuis 0s</span>
         </div>
-        <div class="topology-stage" id="topology-stage">
-          <svg id="topology-svg" class="topology-svg" viewBox="0 0 960 270" role="img" aria-label="Schéma temps réel du maillage entre le nœud local, les relais Nostr et les pairs"></svg>
+        <div class="topology-stage">
+          <svg id="topology-svg" class="topology-svg" viewBox="0 0 960 250" role="img" aria-label="Carte en direct de votre maison, des relais chiffrés et de vos amis"></svg>
         </div>
       </section>
 
       <section class="band">
         <div class="band-head">
-          <h2>Sondes locales</h2>
-          <button type="button" class="inline-action" data-goto="probes">Configurer les sondes</button>
+          <h2>Services surveillés chez vous</h2>
+          <button type="button" class="inline-action" data-goto="discover">Scanner ou modifier</button>
         </div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
               <tr>
-                <th>Sonde</th>
-                <th>Type</th>
+                <th>Service</th>
+                <th>Catégorie</th>
                 <th>État</th>
-                <th>Résumé</th>
-                <th class="num-col">Latence</th>
+                <th>Détail</th>
+                <th class="num-col">Temps de réponse</th>
               </tr>
             </thead>
             <tbody id="ov-probes-body"></tbody>
@@ -148,17 +163,16 @@
 
       <section class="band">
         <div class="band-head">
-          <h2>Pairs du groupe</h2>
-          <button type="button" class="inline-action" data-goto="peers">Gérer les pairs</button>
+          <h2>Chez vos amis</h2>
+          <button type="button" class="inline-action" data-goto="friends">Gérer mes amis</button>
         </div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
               <tr>
-                <th>Pair</th>
-                <th>Clé publique</th>
+                <th>Ami</th>
                 <th>État</th>
-                <th>Dernier signal</th>
+                <th>Dernières nouvelles</th>
                 <th>Uptime Kuma</th>
               </tr>
             </thead>
@@ -168,233 +182,331 @@
       </section>
     </section>
 
-    <!-- TAB 2: PROBES -->
-    <section class="view-panel" id="view-probes" data-panel="probes" hidden>
+    <!-- TAB 2: DÉCOUVRIR & SURVEILLER -->
+    <section class="view-panel" id="view-discover" data-panel="discover" hidden>
       <div class="page-head">
         <div>
-          <h1>Sondes de supervision locale</h1>
-          <p class="muted-copy">Chaque sonde tourne sur son propre intervalle local. Seul le résumé chiffré quitte votre réseau.</p>
+          <h1>Découvrir et surveiller</h1>
+          <p class="muted-copy">Détectez automatiquement vos conteneurs Docker et les appareils de votre réseau local, puis activez leur surveillance en un clic.</p>
         </div>
-        <button type="button" id="add-probe-btn" class="btn-primary">Ajouter une sonde</button>
+        <div class="sub-tabs" role="tablist" aria-label="Mode de découverte">
+          <button type="button" class="sub-tab is-active" role="tab" aria-selected="true" data-subtab="docker">Docker local</button>
+          <button type="button" class="sub-tab" role="tab" aria-selected="false" data-subtab="lan">Réseau local</button>
+          <button type="button" class="sub-tab" role="tab" aria-selected="false" data-subtab="managed">Déjà surveillés</button>
+        </div>
       </div>
 
-      <div class="master-detail">
-        <aside class="probe-list" id="probe-list" aria-label="Liste des sondes"></aside>
-        <div class="probe-editor" id="probe-editor"></div>
+      <!-- SUBTAB A: DOCKER SCAN -->
+      <div class="sub-panel is-active" data-subpanel="docker">
+        <div class="scan-bar">
+          <div class="scan-bar-inputs">
+            <label class="field">
+              <span class="field-label">Rechercher une application Docker</span>
+              <input id="docker-filter-input" type="text" placeholder="Ex. jellyfin, immich, traefik...">
+            </label>
+          </div>
+          <div class="scan-bar-actions">
+            <button type="button" id="docker-select-running-btn" class="inline-action">Cocher tous les actifs</button>
+            <button type="button" id="scan-docker-btn" class="btn-secondary">Actualiser Docker</button>
+            <button type="button" id="apply-docker-btn" class="btn-primary">Appliquer la sélection</button>
+          </div>
+        </div>
+
+        <p id="docker-scan-meta" class="muted-copy scan-meta">Interrogation du socket Docker local...</p>
+        <div id="docker-containers-list" class="discover-list"></div>
+      </div>
+
+      <!-- SUBTAB B: LAN SCAN -->
+      <div class="sub-panel" data-subpanel="lan" hidden>
+        <div class="scan-bar">
+          <div class="scan-bar-inputs">
+            <label class="field">
+              <span class="field-label">Plage de votre réseau local</span>
+              <input id="lan-subnet-input" type="text" class="mono" placeholder="192.168.1.0/24">
+            </label>
+          </div>
+          <div class="scan-bar-actions">
+            <button type="button" id="scan-lan-btn" class="btn-primary">Scanner mon réseau</button>
+          </div>
+        </div>
+
+        <p id="lan-scan-meta" class="muted-copy scan-meta">Cliquez sur Scanner mon réseau pour détecter automatiquement vos NAS Synology, serveurs et applications web locales.</p>
+        <div id="lan-results-list" class="discover-list"></div>
+      </div>
+
+      <!-- SUBTAB C: MANAGED PROBES & MANUAL ADD -->
+      <div class="sub-panel" data-subpanel="managed" hidden>
+        <div class="scan-bar">
+          <div class="scan-bar-inputs">
+            <p class="muted-copy">Ajustez un service existant ou ajoutez un appareil manuellement.</p>
+          </div>
+          <div class="scan-bar-actions">
+            <select id="quick-add-kind" aria-label="Type de service à ajouter">
+              <option value="http">Site ou application web</option>
+              <option value="synology">NAS Synology</option>
+              <option value="docker">Conteneurs Docker</option>
+              <option value="node_exporter">Serveur Linux</option>
+              <option value="windows_exporter">Serveur Windows</option>
+              <option value="tcp">Port réseau (TCP)</option>
+              <option value="snmp_oid">Capteur SNMP personnalisé</option>
+            </select>
+            <button type="button" id="add-probe-btn" class="btn-primary">Ajouter</button>
+          </div>
+        </div>
+
+        <div class="master-detail">
+          <aside class="probe-list" id="probe-list" aria-label="Services surveillés"></aside>
+          <div class="probe-editor" id="probe-editor"></div>
+        </div>
       </div>
     </section>
 
-    <!-- TAB 3: PEERS & KUMA -->
-    <section class="view-panel" id="view-peers" data-panel="peers" hidden>
+    <!-- TAB 3: MES AMIS -->
+    <section class="view-panel" id="view-friends" data-panel="friends" hidden>
       <div class="page-head">
         <div>
-          <h1>Pairs de confiance et Uptime Kuma</h1>
-          <p class="muted-copy">Partagez votre clé publique et la clé de groupe hors bande. Seuls les pairs listés ici sont acceptés.</p>
+          <h1>Mes amis</h1>
+          <p class="muted-copy">Échangez vos codes amis hors ligne pour vous prévenir mutuellement en cas de coupure de courant ou de fibre.</p>
         </div>
-        <button type="button" id="add-peer-btn" class="btn-primary">Ajouter un pair</button>
+        <button type="button" id="add-peer-btn" class="btn-primary">Ajouter un ami</button>
       </div>
 
       <section class="band">
         <div class="band-head">
-          <h2>Identité cryptographique du nœud</h2>
-          <button type="button" id="keygen-btn" class="inline-action">Générer nouvelles clés</button>
+          <h2>Votre carte d'invitation</h2>
+          <button type="button" id="copy-invite-btn" class="inline-action">Copier mon code ami</button>
         </div>
 
         <div class="form-grid two-col">
           <div class="field">
-            <span class="field-label">Clé publique à partager (pubkey_hex)</span>
+            <span class="field-label">Votre code ami (clé publique à donner à vos proches)</span>
             <div class="input-with-action">
-              <input id="id-pubkey" type="text" class="mono" readonly placeholder="Enregistrez ou générez une clé privée">
+              <input id="id-pubkey" type="text" class="mono" readonly placeholder="Sera généré automatiquement">
               <button type="button" class="field-action" data-copy="id-pubkey">Copier</button>
             </div>
           </div>
           <div class="field">
-            <span class="field-label">Tag de routage Nostr (#t)</span>
+            <span class="field-label">Mot de passe secret du groupe (identique entre amis)</span>
             <div class="input-with-action">
-              <input id="id-topic-tag" type="text" class="mono" readonly placeholder="Dérivé de group_psk_hex">
-              <button type="button" class="field-action" data-copy="id-topic-tag">Copier</button>
-            </div>
-          </div>
-          <label class="field">
-            <span class="field-label">Clé privée Nostr (private_key_hex)</span>
-            <div class="input-with-action">
-              <input id="cfg-privkey" type="password" class="mono" autocomplete="off" spellcheck="false" placeholder="64 caractères hexadécimaux">
-              <button type="button" class="field-action" data-toggle-secret="cfg-privkey">Afficher</button>
-            </div>
-            <span class="field-hint">Ne partagez jamais cette clé. Elle signe vos heartbeats.</span>
-          </label>
-          <label class="field">
-            <span class="field-label">Clé secrète du groupe (group_psk_hex)</span>
-            <div class="input-with-action">
-              <input id="cfg-psk" type="password" class="mono" autocomplete="off" spellcheck="false" placeholder="32 octets en hex (64 car.) ou base64">
+              <input id="cfg-psk" type="password" class="mono" autocomplete="off" spellcheck="false" placeholder="Clé partagée du groupe">
               <button type="button" class="field-action" data-toggle-secret="cfg-psk">Afficher</button>
+              <button type="button" class="field-action" data-copy="cfg-psk">Copier</button>
             </div>
-            <span class="field-hint">Identique pour tous les amis du même maillage (chiffrement AES-256-GCM).</span>
-          </label>
+            <span class="field-hint">Chiffre vos échanges de bout en bout. Partagez-le uniquement via Signal ou iMessage.</span>
+          </div>
         </div>
       </section>
 
       <section class="band">
         <div class="band-head">
-          <h2>Pairs autorisés</h2>
-          <span class="band-meta tabular" id="peers-count-label">0 pair</span>
+          <h2>Amis autorisés</h2>
+          <span class="band-meta tabular" id="peers-count-label">0 ami</span>
         </div>
         <div id="peers-list" class="entity-rows"></div>
       </section>
     </section>
 
-    <!-- TAB 4: NOTIFICATIONS & NETWORK -->
-    <section class="view-panel" id="view-network" data-panel="network" hidden>
+    <!-- TAB 4: ALERTES -->
+    <section class="view-panel" id="view-alerts" data-panel="alerts" hidden>
       <div class="page-head">
         <div>
-          <h1>Alertes sortantes et réseau Nostr</h1>
-          <p class="muted-copy">Configurez les relais WSS, la sourdine automatique en cas de coupure fibre et vos canaux de notification.</p>
+          <h1>Vos alertes</h1>
+          <p class="muted-copy">Choisissez comment être prévenu dès qu'un appareil ou la maison d'un ami ne répond plus.</p>
         </div>
-        <button type="button" id="test-notify-btn" class="btn-primary">Tester les notifications</button>
+        <button type="button" id="test-notify-btn" class="btn-primary">Envoyer une alerte de test</button>
       </div>
 
       <div id="test-notify-output" class="test-output" hidden></div>
 
       <section class="band">
         <div class="band-head">
-          <h2>Paramètres du nœud et journalisation</h2>
-        </div>
-        <div class="form-grid three-col">
-          <label class="field">
-            <span class="field-label">Nom du nœud</span>
-            <input id="cfg-node-name" type="text" placeholder="homelab-alix">
-          </label>
-          <label class="field">
-            <span class="field-label">Intervalle de heartbeat</span>
-            <input id="cfg-hb-interval" type="text" class="mono" placeholder="30s">
-          </label>
-          <label class="field">
-            <span class="field-label">Délai d'expiration d'un pair</span>
-            <input id="cfg-peer-timeout" type="text" class="mono" placeholder="90s">
-          </label>
-          <label class="field">
-            <span class="field-label">Niveau de logs</span>
-            <select id="cfg-log-level">
-              <option value="debug">debug</option>
-              <option value="info">info</option>
-              <option value="warn">warn</option>
-              <option value="error">error</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Format de logs</span>
-            <select id="cfg-log-format">
-              <option value="text">Texte lisible</option>
-              <option value="json">JSON structuré</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Timeout Auto-Mute WAN</span>
-            <input id="cfg-automute-timeout" type="text" class="mono" placeholder="3s">
-          </label>
-        </div>
-      </section>
-
-      <section class="band">
-        <div class="band-head">
-          <h2>Relais Nostr et cibles Auto-Mute</h2>
-        </div>
-        <div class="form-grid two-col">
-          <label class="field">
-            <span class="field-label">Relais Nostr WSS (un par ligne)</span>
-            <textarea id="cfg-relays" rows="5" class="mono" spellcheck="false" placeholder="wss://relay.damus.io&#10;wss://nos.lol"></textarea>
-            <span class="field-hint">Recommandé : 3 à 4 relais publics pour la redondance.</span>
-          </label>
-          <label class="field">
-            <span class="field-label">Cibles TCP Auto-Mute (une par ligne, hôte:port)</span>
-            <textarea id="cfg-automute-targets" rows="5" class="mono" spellcheck="false" placeholder="1.1.1.1:443&#10;9.9.9.9:443"></textarea>
-            <span class="field-hint">Si toutes les cibles échouent, les alertes locales sont suspendues.</span>
-          </label>
-        </div>
-      </section>
-
-      <section class="band">
-        <div class="band-head">
-          <h2>Connecteur ntfy</h2>
+          <h2>Notifications sur téléphone (ntfy)</h2>
           <label class="switch-control">
             <input id="cfg-ntfy-enabled" type="checkbox">
             <span class="switch-track"></span>
-            <span class="switch-text">Activer ntfy</span>
+            <span class="switch-text">Activer</span>
           </label>
         </div>
-        <div class="form-grid three-col">
+        <div class="form-grid two-col">
           <label class="field">
-            <span class="field-label">URL du serveur ou topic complet</span>
-            <input id="cfg-ntfy-url" type="url" class="mono" placeholder="https://ntfy.sh/mon-topic-meshwatch">
+            <span class="field-label">Adresse de votre canal ntfy</span>
+            <input id="cfg-ntfy-url" type="url" class="mono" placeholder="https://ntfy.sh/mon-canal-prive">
+            <span class="field-hint">Installez l'application gratuite ntfy sur iOS ou Android et abonnez-vous au même nom.</span>
           </label>
           <label class="field">
-            <span class="field-label">Topic séparé (optionnel)</span>
-            <input id="cfg-ntfy-topic" type="text" class="mono" placeholder="Laisser vide si inclus dans l'URL">
-          </label>
-          <label class="field">
-            <span class="field-label">Jeton Bearer (optionnel)</span>
+            <span class="field-label">Jeton d'accès (si votre serveur est protégé)</span>
             <div class="input-with-action">
-              <input id="cfg-ntfy-token" type="password" class="mono" autocomplete="off">
+              <input id="cfg-ntfy-token" type="password" class="mono" autocomplete="off" placeholder="Optionnel">
               <button type="button" class="field-action" data-toggle-secret="cfg-ntfy-token">Afficher</button>
             </div>
           </label>
         </div>
+        <details class="advanced-fold">
+          <summary>Options ntfy avancées</summary>
+          <div class="form-grid two-col fold-body">
+            <label class="field">
+              <span class="field-label">Nom du topic séparé (si non inclus dans l'adresse)</span>
+              <input id="cfg-ntfy-topic" type="text" class="mono" placeholder="Laisser vide si déjà dans l'URL">
+            </label>
+          </div>
+        </details>
       </section>
 
       <section class="band">
         <div class="band-head">
-          <h2>Passerelle Photon iMessage</h2>
+          <h2>Messages iMessage (passerelle Photon)</h2>
           <label class="switch-control">
             <input id="cfg-photon-enabled" type="checkbox">
             <span class="switch-track"></span>
-            <span class="switch-text">Activer Photon</span>
+            <span class="switch-text">Activer</span>
           </label>
         </div>
         <div class="form-grid three-col">
           <label class="field">
-            <span class="field-label">Endpoint HTTP Photon</span>
-            <input id="cfg-photon-url" type="url" class="mono" placeholder="https://photon.exemple.fr/api/v1/message">
+            <span class="field-label">Adresse de la passerelle Photon</span>
+            <input id="cfg-photon-url" type="url" class="mono" placeholder="https://photon.exemple.fr/send">
           </label>
           <label class="field">
-            <span class="field-label">Destinataire (téléphone ou chat_guid)</span>
+            <span class="field-label">Numéro ou destinataire</span>
             <input id="cfg-photon-recipient" type="text" class="mono" placeholder="+33600000000">
           </label>
           <label class="field">
-            <span class="field-label">Clé API Bearer</span>
+            <span class="field-label">Clé API secrète</span>
             <div class="input-with-action">
               <input id="cfg-photon-token" type="password" class="mono" autocomplete="off">
               <button type="button" class="field-action" data-toggle-secret="cfg-photon-token">Afficher</button>
             </div>
           </label>
-          <label class="field">
-            <span class="field-label">Nom du champ destinataire JSON</span>
-            <input id="cfg-photon-rec-field" type="text" class="mono" placeholder="recipient">
-          </label>
-          <label class="field">
-            <span class="field-label">Nom du champ message JSON</span>
-            <input id="cfg-photon-msg-field" type="text" class="mono" placeholder="message">
-          </label>
         </div>
+        <details class="advanced-fold">
+          <summary>Personnaliser le format JSON Photon</summary>
+          <div class="form-grid two-col fold-body">
+            <label class="field">
+              <span class="field-label">Champ destinataire</span>
+              <input id="cfg-photon-rec-field" type="text" class="mono" placeholder="recipient">
+            </label>
+            <label class="field">
+              <span class="field-label">Champ message</span>
+              <input id="cfg-photon-msg-field" type="text" class="mono" placeholder="message">
+            </label>
+          </div>
+        </details>
       </section>
     </section>
 
-    <!-- TAB 5: YAML -->
-    <section class="view-panel" id="view-yaml" data-panel="yaml" hidden>
+    <!-- TAB 5: RÉGLAGES -->
+    <section class="view-panel" id="view-settings" data-panel="settings" hidden>
       <div class="page-head">
         <div>
-          <h1>Éditeur YAML direct</h1>
-          <p class="muted-copy" id="yaml-path-hint">Synchronisé avec les formulaires visuels. Validé par le moteur Go avant toute sauvegarde.</p>
+          <h1>Réglages et mises à jour</h1>
+          <p class="muted-copy">Personnalisez le nom de votre maison, vérifiez les mises à jour et accédez aux options avancées si besoin.</p>
         </div>
-        <button type="button" id="validate-yaml-btn" class="btn-primary">Valider le YAML</button>
+        <button type="button" id="check-update-btn" class="btn-secondary">Vérifier les mises à jour</button>
       </div>
 
-      <div class="yaml-toolbar">
-        <button type="button" id="sync-from-forms-btn" class="inline-action">Régénérer depuis les formulaires</button>
-        <button type="button" id="copy-yaml-btn" class="inline-action">Copier le YAML</button>
-        <button type="button" id="download-yaml-btn" class="inline-action">Télécharger config.yaml</button>
-      </div>
+      <section class="band">
+        <div class="band-head">
+          <h2>Version et mise à jour</h2>
+          <span class="band-meta mono-inline" id="settings-version-label">Version en cours</span>
+        </div>
+        <div class="update-box">
+          <div>
+            <p class="cell-primary" id="settings-update-headline">Vérification de la version...</p>
+            <p class="muted-copy" id="settings-update-detail"></p>
+          </div>
+          <div class="update-box-actions">
+            <button type="button" id="settings-update-btn" class="btn-primary" hidden>Mettre à jour maintenant</button>
+          </div>
+        </div>
+      </section>
 
-      <textarea id="yaml-editor" class="yaml-editor mono" rows="24" spellcheck="false" aria-label="Configuration YAML MeshWatch"></textarea>
+      <section class="band">
+        <div class="band-head">
+          <h2>Général</h2>
+        </div>
+        <div class="form-grid three-col">
+          <label class="field">
+            <span class="field-label">Nom affiché de votre maison</span>
+            <input id="cfg-node-name" type="text" placeholder="homelab-alix">
+          </label>
+          <label class="field">
+            <span class="field-label">Fréquence d'envoi de présence</span>
+            <input id="cfg-hb-interval" type="text" class="mono" placeholder="30s">
+            <span class="field-hint">Par défaut : toutes les 30s.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Délai avant alerte d'absence</span>
+            <input id="cfg-peer-timeout" type="text" class="mono" placeholder="90s">
+            <span class="field-hint">Par défaut : 90s sans nouvelle d'un ami.</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="band">
+        <details class="advanced-fold">
+          <summary>Options avancées : clés privées, relais Nostr et Auto-Mute</summary>
+          <div class="fold-body">
+            <div class="form-grid two-col">
+              <label class="field">
+                <span class="field-label">Clé privée de signature (private_key_hex)</span>
+                <div class="input-with-action">
+                  <input id="cfg-privkey" type="password" class="mono" autocomplete="off" spellcheck="false">
+                  <button type="button" class="field-action" data-toggle-secret="cfg-privkey">Afficher</button>
+                </div>
+              </label>
+              <div class="field">
+                <span class="field-label">Identifiant de salon chiffré (#t)</span>
+                <div class="input-with-action">
+                  <input id="id-topic-tag" type="text" class="mono" readonly>
+                  <button type="button" id="keygen-btn" class="field-action">Régénérer les clés</button>
+                </div>
+              </div>
+              <label class="field">
+                <span class="field-label">Relais Nostr WSS (un par ligne)</span>
+                <textarea id="cfg-relays" rows="4" class="mono" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">Cibles de test Internet Auto-Mute (une par ligne)</span>
+                <textarea id="cfg-automute-targets" rows="4" class="mono" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">Timeout Auto-Mute</span>
+                <input id="cfg-automute-timeout" type="text" class="mono" placeholder="3s">
+              </label>
+              <label class="field">
+                <span class="field-label">Niveau de journalisation</span>
+                <select id="cfg-log-level">
+                  <option value="debug">debug</option>
+                  <option value="info">info</option>
+                  <option value="warn">warn</option>
+                  <option value="error">error</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Format des logs</span>
+                <select id="cfg-log-format">
+                  <option value="text">Texte lisible</option>
+                  <option value="json">JSON structuré</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details class="advanced-fold" id="yaml-details">
+          <summary>Éditeur YAML direct et sauvegarde manuelle</summary>
+          <div class="fold-body">
+            <p class="muted-copy" id="yaml-path-hint"></p>
+            <div class="yaml-toolbar">
+              <button type="button" id="validate-yaml-btn" class="inline-action">Valider le YAML</button>
+              <button type="button" id="sync-from-forms-btn" class="inline-action">Régénérer depuis l'interface</button>
+              <button type="button" id="copy-yaml-btn" class="inline-action">Copier</button>
+              <button type="button" id="download-yaml-btn" class="inline-action">Télécharger config.yaml</button>
+            </div>
+            <textarea id="yaml-editor" class="yaml-editor mono" rows="18" spellcheck="false" aria-label="Fichier YAML MeshWatch"></textarea>
+          </div>
+        </details>
+      </section>
     </section>
   </main>
 

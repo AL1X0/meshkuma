@@ -20,6 +20,8 @@ import (
 	"meshwatch/internal/probes"
 	"meshwatch/internal/quorum"
 	"meshwatch/internal/transport"
+	"meshwatch/internal/updater"
+	"meshwatch/internal/version"
 	"meshwatch/internal/webui"
 )
 
@@ -43,6 +45,11 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 		return cmdRun(args[1:], stdout, stderr)
 	case "test-notify":
 		return cmdTestNotify(args[1:], stdout, stderr)
+	case "self-update":
+		return cmdSelfUpdate(args[1:], stderr)
+	case "version", "-v", "--version":
+		fmt.Fprintf(stdout, "meshwatch %s (%s)\n", version.Version, version.ShortCommit())
+		return nil
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -81,6 +88,20 @@ func cmdKeygen(w io.Writer) error {
 	fmt.Fprintf(w, "group_psk_hex:   %q  # Share out-of-band with your group (one PSK per mesh)\n", pskHex)
 	fmt.Fprintf(w, "topic_tag:       %q  # Derived Nostr #t tag\n", c.TopicTag())
 	return nil
+}
+
+func cmdSelfUpdate(args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	containerID := fs.String("container", "", "target container ID or name to recreate")
+	imageRef := fs.String("image", version.DefaultDockerImage, "updated Docker image reference")
+	dockerSocket := fs.String("socket", "/var/run/docker.sock", "Docker Engine socket path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	return updater.RunSelfUpdateHelper(ctx, *dockerSocket, *containerID, *imageRef)
 }
 
 func cmdTestNotify(args []string, stdout, stderr io.Writer) error {

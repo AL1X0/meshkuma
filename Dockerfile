@@ -2,6 +2,10 @@
 
 FROM golang:1.23-alpine AS builder
 
+ARG VERSION=v1.0.0
+ARG COMMIT=dev
+ARG BUILD_DATE=""
+
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -12,7 +16,7 @@ COPY internal ./internal
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X meshwatch/internal/version.Version=${VERSION} -X meshwatch/internal/version.Commit=${COMMIT} -X meshwatch/internal/version.BuildDate=${BUILD_DATE}" \
     -o /out/meshwatch \
     ./cmd/meshwatch
 

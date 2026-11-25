@@ -35,20 +35,20 @@ Quand votre fibre tombe ou que votre serveur domestique plante, **votre propre U
 
 ## Console Web locale (opt-in)
 
-Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch embarque (`//go:embed`) une **console de configuration et de supervision temps réel** activable en local via `--ui 127.0.0.1:8080` :
+Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch embarque (`//go:embed`) une **console simple et orientée utilisateur** activable en local via `--ui 127.0.0.1:8080` :
 
-- **Topologie SVG temps réel** reliant votre nœud local, vos relais Nostr WSS et vos pairs.
-- **Constructeur visuel de sondes** pour les 7 types supportés (SNMPv2c/v3 Synology, Docker, `node_exporter`, `windows_exporter`, HTTP/TLS, TCP, OID SNMP).
-- **Gestion des clés & pairs** (`keygen` en un clic, copie `pubkey_hex` / tag `#t`, URLs Push Uptime Kuma).
-- **Test des notifications** (`ntfy` & Photon iMessage) directement depuis l'interface, **mode initialisation** si `config.yaml` n'existe pas encore, et **rechargement à chaud** sans redémarrer le conteneur.
-- **Thème clair / sombre** intégré, interface responsive mobile, protection par jeton Bearer (`--ui-token`).
+- **Accueil clair sans jargon** : état immédiat de votre maison, topologie visuelle en direct et santé de vos amis.
+- **Découverte Docker en 1 clic** : lit `/var/run/docker.sock` pour lister tous les conteneurs de la machine hôte et les cocher/décocher par simple interrupteur.
+- **Scanner de réseau local (RFC1918)** : détecte automatiquement sur votre LAN vos NAS Synology, serveurs Linux/Windows et applications web locales (Jellyfin, Immich, Proxmox, Home Assistant, Uptime Kuma…) et propose de les surveiller en un clic.
+- **Mise à jour directe depuis l'interface** : vérifie automatiquement les nouvelles versions sur GitHub et affiche un bouton **Mettre à jour maintenant** (téléchargement de l'image GHCR + remplacement sécurisé du conteneur avec rollback automatique).
+- **Thème clair / sombre**, interface mobile responsive, protection par jeton Bearer (`--ui-token`), et options avancées (relais Nostr, clés, YAML) rangées discrètement dans **Réglages**.
 
-### Vue d'ensemble (topologie live, sondes et pairs)
+### Vue d'ensemble (avec alerte de mise à jour intégrée)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/overview-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="assets/screenshots/overview-light.png">
-  <img src="assets/screenshots/overview-light.png" alt="MeshWatch Console — Vue d'ensemble temps réel" width="100%">
+  <img src="assets/screenshots/overview-light.png" alt="MeshWatch Console — Accueil temps réel" width="100%">
 </picture>
 
 <details>
@@ -57,20 +57,20 @@ Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch 
 
 | Thème clair (Pierre &amp; Cobalt) | Thème sombre (Encre marine) |
 | :---: | :---: |
-| <img src="assets/screenshots/overview-light.png" alt="Vue d'ensemble thème clair" width="100%"> | <img src="assets/screenshots/overview-dark.png" alt="Vue d'ensemble thème sombre" width="100%"> |
+| <img src="assets/screenshots/overview-light.png" alt="Accueil thème clair" width="100%"> | <img src="assets/screenshots/overview-dark.png" alt="Accueil thème sombre" width="100%"> |
 
 </details>
 
-### Configuration des sondes, alertes et vue mobile
+### Découverte en 1 clic (Docker &amp; Réseau local) et vue mobile
 
-| Constructeur visuel de sondes | Alertes (`ntfy` / Photon) &amp; réseau Nostr |
+| Scan Docker de la machine hôte | Scan automatique du réseau local (LAN) |
 | :---: | :---: |
-| <img src="assets/screenshots/probes-light.png" alt="Constructeur visuel de sondes" width="100%"> | <img src="assets/screenshots/network-dark.png" alt="Configuration des alertes et relais Nostr" width="100%"> |
+| <img src="assets/screenshots/discover-docker.png" alt="Découverte des conteneurs Docker en 1 clic" width="100%"> | <img src="assets/screenshots/discover-lan-dark.png" alt="Scan du réseau local et ajout en 1 clic" width="100%"> |
 
 <div align="center">
   <img src="assets/screenshots/mobile-light.png" alt="MeshWatch Console — Vue mobile responsive" width="320">
   <br/>
-  <sub>Interface mobile responsive (390×844) : synthèse 2×2 et topologie en direct dès l'ouverture.</sub>
+  <sub>Interface mobile responsive (390×844) : mise à jour directe, synthèse 2×2 et réseau d'entraide.</sub>
 </div>
 
 ### Activer la console web locale

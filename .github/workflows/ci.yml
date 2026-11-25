@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -26,14 +27,36 @@ jobs:
         run: go test -race -count=1 -v ./...
 
   docker:
-    name: Docker Image Build (< 25 MB)
+    name: Docker Image Build (< 25 MB) & GHCR Publish
     runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute build metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/}"
+          else
+            VER="main-${SHORT_SHA}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "commit=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build image
-        run: docker build -t meshwatch:ci .
+        run: |
+          docker build \
+            --build-arg VERSION="${{ steps.meta.outputs.version }}" \
+            --build-arg COMMIT="${{ steps.meta.outputs.commit }}" \
+            --build-arg BUILD_DATE="${{ steps.meta.outputs.date }}" \
+            -t meshwatch:ci .
 
       - name: Verify image size and keygen smoke test
         run: |
@@ -41,4 +64,15 @@ jobs:
           SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
           echo "Image size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
           test "$SIZE_BYTES" -lt 26214400
+          docker run --rm meshwatch:ci version
           docker run --rm meshwatch:ci keygen
+
+      - name: Push to GHCR
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMAGE="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          docker tag meshwatch:ci "${IMAGE}:latest"
+          docker tag meshwatch:ci "${IMAGE}:${{ steps.meta.outputs.version }}"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ steps.meta.outputs.version }}"

@@ -194,9 +194,9 @@ func TestWebUIServerEndpointsAndAuth(t *testing.T) {
 		path    string
 		wantSub string
 	}{
-		{"/", "MeshWatch Console"},
+		{"/", "<title>MeshWatch</title>"},
 		{"/styles.css", "--accent:"},
-		{"/app.js", "PROBE_KINDS"},
+		{"/app.js", "runDockerScan"},
 	} {
 		rec = httptest.NewRecorder()
 		req = httptest.NewRequest(http.MethodGet, tc.path, nil)

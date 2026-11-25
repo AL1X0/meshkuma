@@ -19,10 +19,13 @@ import (
 
 	"meshwatch/internal/config"
 	mwcrypto "meshwatch/internal/crypto"
+	"meshwatch/internal/discover"
 	"meshwatch/internal/notify"
 	"meshwatch/internal/probes"
 	"meshwatch/internal/quorum"
 	"meshwatch/internal/transport"
+	"meshwatch/internal/updater"
+	"meshwatch/internal/version"
 )
 
 //go:embed static/*
@@ -40,6 +43,8 @@ type NotificationsStatus struct {
 type RuntimeStatus struct {
 	Mode            string                  `json:"mode"`
 	SetupError      string                  `json:"setup_error,omitempty"`
+	Version         string                  `json:"version"`
+	Commit          string                  `json:"commit"`
 	ConfigPath      string                  `json:"config_path"`
 	ConfigWritable  bool                    `json:"config_writable"`
 	NodeName        string                  `json:"node_name"`
@@ -72,6 +77,7 @@ type ServerConfig struct {
 	AuthToken  string
 	ConfigPath string
 	Controller RuntimeController
+	Updater    *updater.Updater
 	Logger     *slog.Logger
 }
 
@@ -81,6 +87,7 @@ type Server struct {
 	authToken  string
 	configPath string
 	controller RuntimeController
+	updater    *updater.Updater
 	logger     *slog.Logger
 	handler    http.Handler
 }
@@ -94,12 +101,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	upd := cfg.Updater
+	if upd == nil {
+		upd = updater.New(updater.Config{})
+	}
 
 	s := &Server{
 		addr:       cfg.Addr,
 		authToken:  strings.TrimSpace(cfg.AuthToken),
 		configPath: cfg.ConfigPath,
 		controller: cfg.Controller,
+		updater:    upd,
 		logger:     logger,
 	}
 
@@ -118,6 +130,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	mux.HandleFunc("POST /api/keygen", s.requireAuth(s.requireJSON(s.handleKeygen)))
 	mux.HandleFunc("POST /api/test-notify", s.requireAuth(s.requireJSON(s.handleTestNotify)))
 	mux.HandleFunc("POST /api/check-automute", s.requireAuth(s.requireJSON(s.handleCheckAutoMute)))
+	mux.HandleFunc("GET /api/discover/info", s.requireAuth(s.handleDiscoverInfo))
+	mux.HandleFunc("POST /api/discover/docker", s.requireAuth(s.requireJSON(s.handleDiscoverDocker)))
+	mux.HandleFunc("POST /api/discover/lan", s.requireAuth(s.requireJSON(s.handleDiscoverLAN)))
+	mux.HandleFunc("GET /api/update/check", s.requireAuth(s.handleUpdateCheck))
+	mux.HandleFunc("POST /api/update/apply", s.requireAuth(s.requireJSON(s.handleUpdateApply)))
 	mux.Handle("/", s.serveStatic(fileServer))
 
 	s.handler = s.withSecurityHeaders(mux)
@@ -243,6 +260,12 @@ func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	st := s.controller.Status()
+	if st.Version == "" {
+		st.Version = version.Version
+	}
+	if st.Commit == "" {
+		st.Commit = version.ShortCommit()
+	}
 	if st.Relays == nil {
 		st.Relays = []transport.RelayStatus{}
 	}
@@ -516,6 +539,216 @@ func (s *Server) handleCheckAutoMute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"muted":   muted,
 		"targets": st.AutoMuteTargets,
+	})
+}
+
+func (s *Server) preferredDockerSocket() string {
+	cfg, _ := s.controller.CurrentConfig()
+	if cfg != nil {
+		for _, p := range cfg.Probes {
+			if p.Kind == "docker" && strings.TrimSpace(p.Socket) != "" {
+				return strings.TrimSpace(p.Socket)
+			}
+		}
+	}
+	return config.DefaultDockerSocket
+}
+
+func (s *Server) configuredProbeHosts() []string {
+	cfg, _ := s.controller.CurrentConfig()
+	if cfg == nil {
+		return nil
+	}
+	var hosts []string
+	for _, p := range cfg.Probes {
+		if p.Host != "" {
+			hosts = append(hosts, p.Host)
+		}
+		if p.URL != "" {
+			hosts = append(hosts, p.URL)
+		}
+		if p.Address != "" {
+			hosts = append(hosts, p.Address)
+		}
+	}
+	return hosts
+}
+
+func (s *Server) handleDiscoverInfo(w http.ResponseWriter, _ *http.Request) {
+	sock := s.preferredDockerSocket()
+	dockerOK := false
+	if strings.HasPrefix(sock, "tcp://") || strings.HasPrefix(sock, "http://") || strings.HasPrefix(sock, "https://") {
+		dockerOK = true
+	} else if _, err := os.Stat(strings.TrimPrefix(sock, "unix://")); err == nil {
+		dockerOK = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"default_subnet":   discover.DetectDefaultSubnet(s.configuredProbeHosts()),
+		"docker_socket":    sock,
+		"docker_available": dockerOK,
+	})
+}
+
+func (s *Server) handleDiscoverDocker(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Socket string `json:"socket,omitempty"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 16*1024))
+	if len(strings.TrimSpace(string(body))) > 0 {
+		_ = json.Unmarshal(body, &req)
+	}
+	sock := strings.TrimSpace(req.Socket)
+	if sock == "" {
+		sock = s.preferredDockerSocket()
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	containers, err := discover.ScanDocker(ctx, sock)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	monitored := make(map[string]bool)
+	if cfg, _ := s.controller.CurrentConfig(); cfg != nil {
+		for _, p := range cfg.Probes {
+			if p.Kind == "docker" {
+				for _, name := range p.Containers {
+					monitored[strings.TrimPrefix(strings.TrimSpace(name), "/")] = true
+				}
+			}
+		}
+	}
+
+	type containerEntry struct {
+		discover.DockerContainer
+		Monitored bool `json:"monitored"`
+	}
+	items := make([]containerEntry, 0, len(containers))
+	for _, c := range containers {
+		items = append(items, containerEntry{
+			DockerContainer: c,
+			Monitored:       monitored[c.Name] || monitored[c.ID],
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"socket":     sock,
+		"containers": items,
+	})
+}
+
+func (s *Server) handleDiscoverLAN(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Subnet string `json:"subnet,omitempty"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 16*1024))
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "requête JSON invalide")
+			return
+		}
+	}
+	subnet := strings.TrimSpace(req.Subnet)
+	if subnet == "" {
+		subnet = discover.DetectDefaultSubnet(s.configuredProbeHosts())
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+
+	res, err := discover.ScanLAN(ctx, subnet, discover.ScanOptions{})
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	existingTargets := make(map[string]bool)
+	if cfg, _ := s.controller.CurrentConfig(); cfg != nil {
+		for _, p := range cfg.Probes {
+			if p.URL != "" {
+				existingTargets[strings.TrimRight(strings.ToLower(p.URL), "/")] = true
+			}
+			if p.Host != "" {
+				existingTargets[fmt.Sprintf("%s:%s:%d", p.Kind, strings.ToLower(p.Host), p.Port)] = true
+				if p.Kind == "synology" {
+					existingTargets["synology:"+strings.ToLower(p.Host)] = true
+				}
+			}
+		}
+	}
+
+	type lanEntry struct {
+		discover.DiscoveredItem
+		AlreadyMonitored bool `json:"already_monitored"`
+	}
+	out := make([]lanEntry, 0, len(res.Items))
+	for _, item := range res.Items {
+		sp := item.SuggestedProbe
+		dup := false
+		if sp.URL != "" && existingTargets[strings.TrimRight(strings.ToLower(sp.URL), "/")] {
+			dup = true
+		}
+		if sp.Kind == "synology" && existingTargets["synology:"+strings.ToLower(sp.Host)] {
+			dup = true
+		}
+		if sp.Host != "" && existingTargets[fmt.Sprintf("%s:%s:%d", sp.Kind, strings.ToLower(sp.Host), sp.Port)] {
+			dup = true
+		}
+		out = append(out, lanEntry{
+			DiscoveredItem:   item,
+			AlreadyMonitored: dup,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"subnet":      res.Subnet,
+		"scanned_ips": res.ScannedIPs,
+		"duration_ms": res.DurationMs,
+		"items":       out,
+	})
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+
+	res, err := s.updater.Check(ctx, force)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":           err.Error(),
+			"current_version": res.CurrentVersion,
+			"current_commit":  res.CurrentCommit,
+			"can_auto_update": res.CanAutoUpdate,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Image string `json:"image,omitempty"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 16*1024))
+	if len(strings.TrimSpace(string(body))) > 0 {
+		_ = json.Unmarshal(body, &req)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+
+	if err := s.updater.ApplyDockerUpdate(ctx, req.Image); err != nil {
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"updating": true,
+		"message":  "Mise à jour lancée : le conteneur va redémarrer automatiquement.",
 	})
 }
 
