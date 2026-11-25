@@ -8,13 +8,13 @@
 
 [![CI](https://github.com/AL1X0/meshkuma/actions/workflows/ci.yml/badge.svg)](https://github.com/AL1X0/meshkuma/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Docker Image](https://img.shields.io/badge/Docker-10.5%20MB%20distroless-2496ED?logo=docker&logoColor=white)](Dockerfile)
+[![Docker Image](https://img.shields.io/badge/Docker-11.3%20MB%20distroless-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![Zero Inbound Ports](https://img.shields.io/badge/Ports%20entrants-0%20(100%25%20sortant)-10B981)](#sécurité--protocole-nostr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-a855f7.svg)](LICENSE)
 
 **Supervisez vos homelabs entre amis — sans ouvrir aucun port, sans VPS central, et avec chiffrement de bout en bout.**
 
-[Architecture](#architecture) · [Fonctionnalités](#fonctionnalités-clés) · [Sondes](#sondes-supportées) · [Démarrage rapide](#démarrage-rapide-en-5-étapes) · [Sécurité](#sécurité--protocole-nostr) · [CLI](#commandes-cli)
+[Console Web](#console-web-locale-opt-in) · [Architecture](#architecture) · [Fonctionnalités](#fonctionnalités-clés) · [Sondes](#sondes-supportées) · [Démarrage rapide](#démarrage-rapide-en-5-étapes) · [Sécurité](#sécurité--protocole-nostr) · [CLI](#commandes-cli)
 
 </div>
 
@@ -26,10 +26,60 @@ Quand votre fibre tombe ou que votre serveur domestique plante, **votre propre U
 
 **MeshWatch** résout ce problème en créant un **maillage P2P de supervision entre amis** :
 
-- Chacun héberge un petit conteneur Docker Go (**10,5 Mo**, `< 30 Mo` de RAM) dans son propre LAN.
+- Chacun héberge un petit conteneur Docker Go (**11,3 Mo**, `< 30 Mo` de RAM) dans son propre LAN.
 - Chaque agent exécute **localement** ses sondes (Synology SNMP, Docker, Linux `node_exporter`, Windows `windows_exporter`, HTTP/TLS, TCP, SNMP générique).
 - Il publie périodiquement un résumé JSON **chiffré en AES-256-GCM** via des **relais Nostr publics** (`kind: 24242`, éphémères, jamais stockés sur disque).
 - Les pairs abonnés reçoivent ces heartbeats, alimentent leur **Uptime Kuma local (Push / Dead Man's Switch)**, et élisent automatiquement **un seul notificateur** (`ntfy` / **Photon iMessage**) en cas de panne — fini les tempêtes d'alertes !
+
+---
+
+## Console Web locale (opt-in)
+
+Désactivée par défaut pour préserver une surface d'attaque nulle, MeshWatch embarque (`//go:embed`) une **console de configuration et de supervision temps réel** activable en local via `--ui 127.0.0.1:8080` :
+
+- **Topologie SVG temps réel** reliant votre nœud local, vos relais Nostr WSS et vos pairs.
+- **Constructeur visuel de sondes** pour les 7 types supportés (SNMPv2c/v3 Synology, Docker, `node_exporter`, `windows_exporter`, HTTP/TLS, TCP, OID SNMP).
+- **Gestion des clés & pairs** (`keygen` en un clic, copie `pubkey_hex` / tag `#t`, URLs Push Uptime Kuma).
+- **Test des notifications** (`ntfy` & Photon iMessage) directement depuis l'interface, **mode initialisation** si `config.yaml` n'existe pas encore, et **rechargement à chaud** sans redémarrer le conteneur.
+- **Thème clair / sombre** intégré, interface responsive mobile, protection par jeton Bearer (`--ui-token`).
+
+### Vue d'ensemble (topologie live, sondes et pairs)
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/overview-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/screenshots/overview-light.png">
+  <img src="assets/screenshots/overview-light.png" alt="MeshWatch Console — Vue d'ensemble temps réel" width="100%">
+</picture>
+
+<details>
+<summary>Voir les deux thèmes (Clair &amp; Sombre) côte à côte</summary>
+<br/>
+
+| Thème clair (Pierre &amp; Cobalt) | Thème sombre (Encre marine) |
+| :---: | :---: |
+| <img src="assets/screenshots/overview-light.png" alt="Vue d'ensemble thème clair" width="100%"> | <img src="assets/screenshots/overview-dark.png" alt="Vue d'ensemble thème sombre" width="100%"> |
+
+</details>
+
+### Configuration des sondes, alertes et vue mobile
+
+| Constructeur visuel de sondes | Alertes (`ntfy` / Photon) &amp; réseau Nostr |
+| :---: | :---: |
+| <img src="assets/screenshots/probes-light.png" alt="Constructeur visuel de sondes" width="100%"> | <img src="assets/screenshots/network-dark.png" alt="Configuration des alertes et relais Nostr" width="100%"> |
+
+<div align="center">
+  <img src="assets/screenshots/mobile-light.png" alt="MeshWatch Console — Vue mobile responsive" width="320">
+  <br/>
+  <sub>Interface mobile responsive (390×844) : synthèse 2×2 et topologie en direct dès l'ouverture.</sub>
+</div>
+
+### Activer la console web locale
+
+```bash
+meshwatch run --config config.yaml --ui 127.0.0.1:8080 --ui-token "mon-jeton-local"
+```
+
+Avec Docker Compose, décommentez `ports` (`127.0.0.1:8080:8080`) et `MESHWATCH_UI_ADDR` / `MESHWATCH_UI_TOKEN` dans [docker-compose.yml](docker-compose.yml) (retirez `:ro` sur `config.yaml` pour sauvegarder directement depuis la console, ou téléchargez le fichier depuis l'onglet **YAML**).
 
 ---
 
@@ -44,7 +94,7 @@ flowchart LR
         WIN["Serveur Windows<br/>windows_exporter"]
         WEB["Services HTTP / TLS / TCP"]
 
-        AGENT["MeshWatch Agent<br/>(Go · distroless 10.5 MB)"]
+        AGENT["MeshWatch Agent<br/>(Go · distroless 11.3 MB)"]
         KUMA["Uptime Kuma<br/>(Push / Dead Man's Switch)"]
 
         SYNO --> AGENT
@@ -84,8 +134,9 @@ flowchart LR
 | **Auto-Mute (protection coupure fibre)** | Vérifie la connectivité WAN par dial TCP (`1.1.1.1:443`, `9.9.9.9:443`, timeout 3 s) avant toute alerte. Si votre connexion locale tombe, le nœud se met en sourdine (`muted = true`) pour éviter tout faux positif. |
 | **Quorum Anti-Alert Storm** | Élection déterministe par ordre lexicographique des `pubkey` en ligne + `alert_claim` sur Nostr : **Rang 0** notifie immédiatement, **Rang 1** attend `15s` en failover, **Rang ≥ 2** attend `30s`. Même logique pour les `RESOLVED`. |
 | **Pont Uptime Kuma natif** | Transmet chaque heartbeat valide (`status=up/down`, détail de la sonde fautive dans `msg`, `ping`). Si un pair s'éteint, le Dead Man's Switch d'Uptime Kuma bascule automatiquement en rouge. |
+| **Console web opt-in (`--ui`)** | Interface locale embarquée (`//go:embed`) avec topologie SVG temps réel, éditeur visuel de sondes/pairs/alertes, `keygen`, `test-notify`, mode initialisation et hot-reload. |
 | **Alertes `ntfy` & Photon iMessage** | Formatage clair (nœud, sonde, résumé, horodatage UTC) avec 3 retries exponentiels (`2s`, `5s`, `10s`) sur erreurs réseau / 5xx et commande `test-notify`. |
-| **Empreinte minimale** | Binaire Go statique (`CGO_ENABLED=0`), image `gcr.io/distroless/static-debian12:nonroot` de **10,5 Mo**, système de fichiers en lecture seule (`read_only: true`). |
+| **Empreinte minimale** | Binaire Go statique (`CGO_ENABLED=0`), image `gcr.io/distroless/static-debian12:nonroot` de **11,3 Mo**, système de fichiers en lecture seule (`read_only: true`). |
 
 ---
 
@@ -135,14 +186,14 @@ Partagez via Signal / iMessage / en personne :
 1. Le **même** `group_psk_hex` pour tout le groupe.
 2. Votre `pubkey_hex` publique (**ne partagez jamais `private_key_hex`**).
 
-### 3. Créer et éditer `config.yaml`
+### 3. Créer et éditer `config.yaml` (en YAML ou via la console `--ui`)
 
 ```bash
 cp config.example.yaml config.yaml
 chmod 600 config.yaml
 ```
 
-Complétez [config.example.yaml](config.example.yaml) avec :
+Complétez [config.example.yaml](config.example.yaml) (ou configurez-le visuellement via `--ui 127.0.0.1:8080`) avec :
 - Votre `node.name`, votre `private_key_hex` et le `group_psk_hex` du groupe.
 - La liste `peers` avec le nom, la `pubkey_hex` de chaque ami et *(optionnel)* l'URL Push créée dans votre **Uptime Kuma** local (`http://uptime-kuma:3001/api/push/<TOKEN>`).
 - Vos sondes locales (`probes`) et vos canaux d'alerte (`notifications.ntfy` / `notifications.photon_imessage`).
@@ -196,20 +247,8 @@ Chaque événement publié sur les relais publics respecte strictement :
 | :--- | :--- |
 | `meshwatch keygen` | Génère une paire de clés Nostr (`private_key_hex`, `pubkey_hex`), un `group_psk_hex` de 32 octets et affiche le `topic_tag` dérivé. |
 | `meshwatch run --config config.yaml` | Démarre le démon de supervision en mode pur CLI (zéro port en écoute). |
-| `meshwatch run --config config.yaml --ui 127.0.0.1:8080 [--ui-token SECRET]` | Démarre l'agent avec la **console web locale embarquée** (`go:embed`, opt-in) : topologie temps réel, éditeur visuel de sondes/pairs/alertes, `keygen`, `test-notify` et rechargement à chaud (`hot-reload`) sans redémarrer le conteneur. |
+| `meshwatch run --config config.yaml --ui 127.0.0.1:8080 [--ui-token SECRET]` | Démarre l'agent avec la **console web locale embarquée** (`//go:embed`, opt-in) et rechargement à chaud (`hot-reload`). |
 | `meshwatch test-notify --config config.yaml` | Envoie une alerte de test sur tous les connecteurs activés (`ntfy`, `photon_imessage`). |
-
-### Console web locale (opt-in)
-
-Désactivée par défaut pour préserver la surface d'attaque zéro, une console de configuration embarquée (`//go:embed`, thème clair/sombre, responsive) peut être activée en local via `--ui` (ou les variables d'environnement `MESHWATCH_UI_ADDR` et `MESHWATCH_UI_TOKEN`) :
-
-```bash
-meshwatch run --config config.yaml --ui 127.0.0.1:8080 --ui-token "mon-jeton-local"
-```
-
-- **Mode initialisation** : si `config.yaml` n'existe pas encore, la console démarre directement pour vous permettre de générer vos clés, configurer vos sondes et enregistrer le fichier.
-- **Rechargement à chaud** : toute modification validée est enregistrée sur disque (ou téléchargeable si le fichier est monté en `:ro`) puis appliquée à chaud à l'agent.
-- **Sécurité** : ne l'exposez jamais sur le WAN ; liez-la sur `127.0.0.1` ou protégez-la par `--ui-token` derrière votre LAN/VPN.
 
 ---
 
@@ -232,7 +271,11 @@ docker images meshwatch:latest
 
 ```text
 .
-├── cmd/meshwatch/          # CLI (run, keygen, test-notify) et boucle principale
+├── assets/
+│   ├── banner.svg          # Bannière du dépôt
+│   ├── icon.svg            # Icône vectorielle MeshWatch
+│   └── screenshots/        # Captures haute définition de la console web locale
+├── cmd/meshwatch/          # CLI (run, keygen, test-notify), hot-reload & setup mode
 ├── internal/
 │   ├── config/             # Parsing YAML strict & validation
 │   ├── crypto/             # HKDF-SHA256, AES-256-GCM, dérivation #t & keygen
@@ -240,7 +283,8 @@ docker images meshwatch:latest
 │   ├── probes/             # Scheduler concurrent + sondes HTTP/TLS, TCP, Docker, Synology, SNMP, Exporters
 │   ├── quorum/             # Auto-Mute WAN, suivi des pairs, élection du notificateur (alert_claim)
 │   ├── kuma/               # Client HTTP Push vers Uptime Kuma
-│   └── notify/             # Connecteurs ntfy & Photon iMessage avec retry exponentiel
+│   ├── notify/             # Connecteurs ntfy & Photon iMessage avec retry exponentiel
+│   └── webui/              # Console web locale opt-in (API REST + assets //go:embed)
 ├── Dockerfile              # Multi-stage golang:1.23-alpine → distroless/static-debian12:nonroot
 ├── docker-compose.yml      # Stack Uptime Kuma + MeshWatch (read_only, no-new-privileges)
 ├── config.example.yaml     # Exemple complet de configuration

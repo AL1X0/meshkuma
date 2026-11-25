@@ -65,7 +65,7 @@
 
     <rect x="392" y="0" width="200" height="36" rx="18" fill="#0f172a" stroke="#a855f7" stroke-opacity="0.55"/>
     <circle cx="412" cy="18" r="4.5" fill="#c084fc"/>
-    <text x="426" y="23" fill="#e9d5ff">Distroless 10.5 MB</text>
+    <text x="426" y="23" fill="#e9d5ff">Distroless 11.3 MB</text>
 
     <rect x="606" y="0" width="192" height="36" rx="18" fill="#0f172a" stroke="#f59e0b" stroke-opacity="0.55"/>
     <circle cx="626" cy="18" r="4.5" fill="#fbbf24"/>

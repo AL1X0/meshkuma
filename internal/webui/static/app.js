@@ -386,7 +386,7 @@
           '<rect x="690" y="' + (py - 26) + '" width="234" height="52" rx="8" fill="' + cSurface + '" stroke="' + cBorder + '" stroke-width="1.4"/>' +
           '<circle cx="710" cy="' + py + '" r="5" fill="' + pColor + '"/>' +
           '<text x="725" y="' + (py - 3) + '" fill="' + cText + '" font-size="15" font-weight="600">' + escapeHTML(peer.name.slice(0, 22)) + "</text>" +
-          '<text x="725" y="' + (py + 15) + '" fill="' + cMuted + '" font-size="13">' + escapeHTML(pState) + " · " + escapeHTML(shortKey(peer.pubkey_hex).slice(0, 12)) + "</text>" +
+          '<text x="725" y="' + (py + 15) + '" fill="' + cMuted + '" font-size="13">' + escapeHTML(pState) + " · " + escapeHTML((peer.pubkey_hex || "").slice(0, 10)) + "</text>" +
           "</g>";
       });
     }
