@@ -95,7 +95,7 @@ meshwatch/
 ```json
 {
   "type": "heartbeat",
-  "node_name": "homelab-alix",
+  "node_name": "mon-homelab",
   "ts": 1764060000,
   "uptime_sec": 84210,
   "overall_ok": true,
@@ -196,7 +196,7 @@ type ProbeResult struct {
 
 ```yaml
 node:
-  name: "homelab-alix"
+  name: "mon-homelab"
   private_key_hex: "REMPLACER_VIA_KEYGEN"
   group_psk_hex: "REMPLACER_VIA_KEYGEN"
   heartbeat_interval: 30s
@@ -213,7 +213,7 @@ auto_mute:
   targets: ["1.1.1.1:443", "9.9.9.9:443"]
 
 peers:
-  - name: "pote-thomas"
+  - name: "ami-nord"
     pubkey_hex: "PUBKEY_HEX_DU_POTE"
     kuma_push_url: "http://uptime-kuma:3001/api/push/XXXXXXXX"
 
@@ -221,7 +221,7 @@ probes:
   - id: "syno-nas"
     kind: "synology"
     interval: 60s
-    host: "192.168.1.43"
+    host: "192.168.1.20"
     snmp_version: "2c"
     community: "public"
     max_temp_c: 55

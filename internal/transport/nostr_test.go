@@ -227,7 +227,7 @@ func TestMultiRelayEncryptedExchangeAndDeduplication(t *testing.T) {
 
 	// Node A publishes a heartbeat across all 3 relays.
 	sentHB := HeartbeatPayload{
-		NodeName:  "homelab-alix",
+		NodeName:  "mon-homelab",
 		UptimeSec: 84210,
 		OverallOK: true,
 		Probes: []probes.ProbeResult{
@@ -252,7 +252,7 @@ func TestMultiRelayEncryptedExchangeAndDeduplication(t *testing.T) {
 		if msg.Type != TypeHeartbeat || msg.Heartbeat == nil {
 			t.Fatalf("expected heartbeat message, got %+v", msg)
 		}
-		if msg.Heartbeat.NodeName != "homelab-alix" || !msg.Heartbeat.OverallOK || len(msg.Heartbeat.Probes) != 2 {
+		if msg.Heartbeat.NodeName != "mon-homelab" || !msg.Heartbeat.OverallOK || len(msg.Heartbeat.Probes) != 2 {
 			t.Fatalf("unexpected heartbeat payload: %+v", msg.Heartbeat)
 		}
 	case <-time.After(3 * time.Second):

@@ -48,12 +48,12 @@ func TestNtfyNotifierHeadersAndStates(t *testing.T) {
 	downAlert := Alert{
 		IncidentID: "abc:123",
 		State:      StateDown,
-		NodeName:   "pote-thomas",
+		NodeName:   "ami-nord",
 		ProbeID:    "win-srv-01",
 		Reason:     "probe_failed:win-srv-01",
 		Summary:    "Service VeeamBackup stopped",
 		Timestamp:  ts,
-		ReportedBy: "homelab-alix",
+		ReportedBy: "mon-homelab",
 	}
 
 	if err := n.Send(context.Background(), downAlert); err != nil {
@@ -65,7 +65,7 @@ func TestNtfyNotifierHeadersAndStates(t *testing.T) {
 	if gotPriority != "urgent" || gotTags != "rotating_light" || gotAuth != "Bearer tk_secret123" {
 		t.Fatalf("unexpected headers: priority=%q tags=%q auth=%q", gotPriority, gotTags, gotAuth)
 	}
-	if !strings.Contains(gotTitle, "DOWN") || !strings.Contains(gotTitle, "pote-thomas") {
+	if !strings.Contains(gotTitle, "DOWN") || !strings.Contains(gotTitle, "ami-nord") {
 		t.Fatalf("unexpected title: %q", gotTitle)
 	}
 	if !strings.Contains(gotBody, "Service VeeamBackup stopped") || !strings.Contains(gotBody, "2026-11-25T12:00:00Z") {
@@ -125,12 +125,12 @@ func TestPhotonNotifierPayloadHeadersAndRetries(t *testing.T) {
 
 	alert := Alert{
 		State:      StateDown,
-		NodeName:   "homelab-thomas",
+		NodeName:   "homelab-nord",
 		ProbeID:    "syno-nas",
 		Reason:     "probe_failed:syno-nas",
 		Summary:    "RAID#1 Degraded (11)",
 		Timestamp:  time.Now().UTC(),
-		ReportedBy: "homelab-alix",
+		ReportedBy: "mon-homelab",
 	}
 
 	if err := p.Send(context.Background(), alert); err != nil {
@@ -145,7 +145,7 @@ func TestPhotonNotifierPayloadHeadersAndRetries(t *testing.T) {
 	if gotPayload["recipient"] != "+33600000000" {
 		t.Fatalf("recipient = %q, want +33600000000", gotPayload["recipient"])
 	}
-	if !strings.Contains(gotPayload["message"], "RAID#1 Degraded (11)") || !strings.Contains(gotPayload["message"], "homelab-thomas") {
+	if !strings.Contains(gotPayload["message"], "RAID#1 Degraded (11)") || !strings.Contains(gotPayload["message"], "homelab-nord") {
 		t.Fatalf("unexpected message payload: %q", gotPayload["message"])
 	}
 

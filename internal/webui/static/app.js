@@ -217,7 +217,7 @@
       $("ov-headline").textContent = (st.node_name || "Votre maison") + " est connecté";
       $("ov-subtitle").textContent = "Ajoutez vos premiers appareils ou conteneurs Docker dans l'onglet Découvrir.";
     } else {
-      $("ov-headline").textContent = "Tout fonctionne chez " + (st.node_name || "vous");
+      $("ov-headline").textContent = "Tout fonctionne sur " + (st.node_name || "votre homelab");
       $("ov-subtitle").textContent = "Vos " + probes.length + " services répondent normalement. Zéro port entrant ouvert.";
     }
 
@@ -868,7 +868,7 @@
         (p, idx) =>
           '<div class="peer-row" data-peer-idx="' + idx + '">' +
           '<label class="field"><span class="field-label">Prénom ou surnom</span>' +
-          '<input type="text" data-peer-field="name" value="' + escapeHTML(p.name || "") + '" placeholder="Thomas"></label>' +
+          '<input type="text" data-peer-field="name" value="' + escapeHTML(p.name || "") + '" placeholder="Homelab Nord"></label>' +
           '<label class="field"><span class="field-label">Code ami (clé publique)</span>' +
           '<input type="text" class="mono" data-peer-field="pubkey_hex" value="' + escapeHTML(p.pubkey_hex || "") + '" placeholder="Collez son code ami"></label>' +
           '<label class="field"><span class="field-label">Lien Push Uptime Kuma (optionnel)</span>' +
@@ -909,7 +909,7 @@
       case "docker":
         return Object.assign(base, { interval: "30s", socket: state.dockerSocket, containers: [] });
       case "synology":
-        return Object.assign(base, { host: "192.168.1.43", port: 161, snmp_version: "2c", community: "public", max_temp_c: 55 });
+        return Object.assign(base, { host: "192.168.1.20", port: 161, snmp_version: "2c", community: "public", max_temp_c: 55 });
       case "snmp_oid":
         return Object.assign(base, { host: "192.168.1.50", port: 161, snmp_version: "2c", community: "public", oid: ".1.3.6.1.2.1.1.3.0", expected_value: "1" });
       case "node_exporter":
@@ -1010,7 +1010,7 @@
         const isV3 = p.snmp_version === "3";
         simpleFields =
           '<label class="field"><span class="field-label">Adresse IP du NAS / appareil</span>' +
-          '<input type="text" class="mono" data-pf="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.43"></label>';
+          '<input type="text" class="mono" data-pf="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.20"></label>';
         if (p.kind === "synology") {
           simpleFields +=
             '<label class="field"><span class="field-label">Température max. (°C)</span>' +

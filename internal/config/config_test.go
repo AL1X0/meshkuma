@@ -28,7 +28,7 @@ func validTestYAML(t *testing.T) (string, string, string) {
 
 	yml := fmt.Sprintf(`
 node:
-  name: "homelab-alix"
+  name: "mon-homelab"
   private_key_hex: "%s"
   group_psk_hex: "%s"
   heartbeat_interval: 30s
@@ -43,7 +43,7 @@ auto_mute:
   targets: ["1.1.1.1:443", "9.9.9.9:443"]
 
 peers:
-  - name: "pote-thomas"
+  - name: "ami-nord"
     pubkey_hex: "%s"
     kuma_push_url: "http://uptime-kuma:3001/api/push/XXXXXXXX"
 
@@ -51,7 +51,7 @@ probes:
   - id: "syno-nas"
     kind: "synology"
     interval: 60s
-    host: "192.168.1.43"
+    host: "192.168.1.20"
     snmp_version: "2c"
     community: "public"
     max_temp_c: 55

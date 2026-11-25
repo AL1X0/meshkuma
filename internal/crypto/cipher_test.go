@@ -20,7 +20,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 		t.Fatalf("NewCipherFromString() error = %v", err)
 	}
 
-	payload := []byte(`{"type":"heartbeat","node_name":"homelab-alix","overall_ok":true}`)
+	payload := []byte(`{"type":"heartbeat","node_name":"mon-homelab","overall_ok":true}`)
 	enc1, err := c.Encrypt(payload)
 	if err != nil {
 		t.Fatalf("Encrypt() error = %v", err)

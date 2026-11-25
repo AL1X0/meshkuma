@@ -35,7 +35,7 @@ func TestPusherUpAndDown(t *testing.T) {
 
 	// 1. Healthy heartbeat -> status=up
 	hbUp := &transport.HeartbeatPayload{
-		NodeName:  "pote-thomas",
+		NodeName:  "ami-nord",
 		OverallOK: true,
 		Probes: []probes.ProbeResult{
 			{ID: "syno", Kind: "synology", OK: true, Summary: "RAID OK"},
@@ -51,7 +51,7 @@ func TestPusherUpAndDown(t *testing.T) {
 
 	// 2. Failing internal probe -> status=down with failing probe detail in msg
 	hbDown := &transport.HeartbeatPayload{
-		NodeName:  "pote-thomas",
+		NodeName:  "ami-nord",
 		OverallOK: false,
 		Probes: []probes.ProbeResult{
 			{ID: "syno", Kind: "synology", OK: true, Summary: "RAID OK"},
