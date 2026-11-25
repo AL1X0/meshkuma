@@ -257,11 +257,33 @@ func (p *Pool) Messages() <-chan IncomingMessage {
 	return p.messages
 }
 
+// RelayStatus describes the live connection state of a single configured Nostr relay.
+type RelayStatus struct {
+	URL       string `json:"url"`
+	Connected bool   `json:"connected"`
+}
+
 // ConnectedRelays returns the number of currently connected and subscribed relays.
 func (p *Pool) ConnectedRelays() int {
 	p.stateMu.RLock()
 	defer p.stateMu.RUnlock()
 	return len(p.active)
+}
+
+// RelayStatuses returns the ordered connection state of every configured relay.
+func (p *Pool) RelayStatuses() []RelayStatus {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+
+	out := make([]RelayStatus, 0, len(p.relays))
+	for _, u := range p.relays {
+		_, connected := p.active[u]
+		out = append(out, RelayStatus{
+			URL:       u,
+			Connected: connected,
+		})
+	}
+	return out
 }
 
 // WaitConnected blocks until at least minRelays are connected and subscribed, or ctx ends.

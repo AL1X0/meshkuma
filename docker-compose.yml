@@ -27,6 +27,14 @@ services:
     # de l'hôte (stat -c '%g' /var/run/docker.sock) ou utilise un docker-socket-proxy en lecture seule :
     # group_add:
     #   - "999"
+    # Pour activer la console web locale de configuration (opt-in, désactivée par défaut) :
+    # 1. Retire ":ro" sur ./config.yaml si tu veux sauvegarder directement depuis l'interface.
+    # 2. Décommente ports + environment ci-dessous (ne jamais exposer sur Internet sans VPN/proxy auth) :
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    # environment:
+    #   - MESHWATCH_UI_ADDR=0.0.0.0:8080
+    #   - MESHWATCH_UI_TOKEN=change-moi-par-un-jeton-secret
     command: ["run", "--config", "/etc/meshwatch/config.yaml"]
 
 networks:

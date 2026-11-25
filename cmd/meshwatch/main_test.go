@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 
+	"meshwatch/internal/config"
 	mwcrypto "meshwatch/internal/crypto"
 )
 
@@ -112,5 +114,54 @@ notifications:
 	if !strings.Contains(out.String(), `Testing notifier "ntfy"... OK`) ||
 		!strings.Contains(out.String(), `Testing notifier "photon_imessage"... OK`) {
 		t.Fatalf("unexpected stdout:\n%s", out.String())
+	}
+}
+
+func TestAgentManagerSetupAndHotReload(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logBuf bytes.Buffer
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	mgr := newAgentManager(ctx, cfgPath, &logBuf)
+	defer mgr.Stop()
+
+	mgr.setSetupMode("", "missing config")
+	if st := mgr.Status(); st.Mode != "setup" {
+		t.Fatalf("expected setup mode, got %q", st.Mode)
+	}
+
+	priv, _, _ := mwcrypto.GenerateNostrKeypair()
+	psk, _ := mwcrypto.GeneratePSK()
+	makeCfg := func(name string) ([]byte, *config.Config) {
+		raw := []byte(fmt.Sprintf(`
+node:
+  name: "%s"
+  private_key_hex: "%s"
+  group_psk_hex: "%s"
+nostr:
+  relays: ["ws://127.0.0.1:1"]
+`, name, priv, psk))
+		parsed, err := config.Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(%s): %v", name, err)
+		}
+		return raw, parsed
+	}
+
+	raw1, cfg1 := makeCfg("node-v1")
+	if err := mgr.ApplyConfig(ctx, raw1, cfg1); err != nil {
+		t.Fatalf("ApplyConfig v1: %v", err)
+	}
+	if st := mgr.Status(); st.Mode != "running" || st.NodeName != "node-v1" {
+		t.Fatalf("unexpected v1 status: %+v", st)
+	}
+
+	raw2, cfg2 := makeCfg("node-v2")
+	if err := mgr.ApplyConfig(ctx, raw2, cfg2); err != nil {
+		t.Fatalf("ApplyConfig v2 hot-reload: %v", err)
+	}
+	if st := mgr.Status(); st.Mode != "running" || st.NodeName != "node-v2" {
+		t.Fatalf("unexpected v2 status after hot-reload: %+v", st)
 	}
 }

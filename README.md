@@ -195,8 +195,21 @@ Chaque événement publié sur les relais publics respecte strictement :
 | Commande | Description |
 | :--- | :--- |
 | `meshwatch keygen` | Génère une paire de clés Nostr (`private_key_hex`, `pubkey_hex`), un `group_psk_hex` de 32 octets et affiche le `topic_tag` dérivé. |
-| `meshwatch run --config config.yaml` | Démarre le démon de supervision (scheduler de sondes, pool Nostr, pont Kuma, moteur de quorum). |
+| `meshwatch run --config config.yaml` | Démarre le démon de supervision en mode pur CLI (zéro port en écoute). |
+| `meshwatch run --config config.yaml --ui 127.0.0.1:8080 [--ui-token SECRET]` | Démarre l'agent avec la **console web locale embarquée** (`go:embed`, opt-in) : topologie temps réel, éditeur visuel de sondes/pairs/alertes, `keygen`, `test-notify` et rechargement à chaud (`hot-reload`) sans redémarrer le conteneur. |
 | `meshwatch test-notify --config config.yaml` | Envoie une alerte de test sur tous les connecteurs activés (`ntfy`, `photon_imessage`). |
+
+### Console web locale (opt-in)
+
+Désactivée par défaut pour préserver la surface d'attaque zéro, une console de configuration embarquée (`//go:embed`, thème clair/sombre, responsive) peut être activée en local via `--ui` (ou les variables d'environnement `MESHWATCH_UI_ADDR` et `MESHWATCH_UI_TOKEN`) :
+
+```bash
+meshwatch run --config config.yaml --ui 127.0.0.1:8080 --ui-token "mon-jeton-local"
+```
+
+- **Mode initialisation** : si `config.yaml` n'existe pas encore, la console démarre directement pour vous permettre de générer vos clés, configurer vos sondes et enregistrer le fichier.
+- **Rechargement à chaud** : toute modification validée est enregistrée sur disque (ou téléchargeable si le fichier est monté en `:ro`) puis appliquée à chaud à l'agent.
+- **Sécurité** : ne l'exposez jamais sur le WAN ; liez-la sur `127.0.0.1` ou protégez-la par `--ui-token` derrière votre LAN/VPN.
 
 ---
 

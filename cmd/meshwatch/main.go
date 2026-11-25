@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"meshwatch/internal/probes"
 	"meshwatch/internal/quorum"
 	"meshwatch/internal/transport"
+	"meshwatch/internal/webui"
 )
 
 func main() {
@@ -54,9 +56,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "MeshWatch — Decentralized P2P Monitoring over Nostr + Uptime Kuma")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  meshwatch keygen                           Generate Nostr keypair and 32-byte group PSK")
-	fmt.Fprintln(w, "  meshwatch run --config <config.yaml>       Start the MeshWatch monitoring daemon")
-	fmt.Fprintln(w, "  meshwatch test-notify --config <path>      Send a test alert to configured notifiers")
+	fmt.Fprintln(w, "  meshwatch keygen                                           Generate Nostr keypair and 32-byte group PSK")
+	fmt.Fprintln(w, "  meshwatch run --config <path> [--ui 127.0.0.1:8080]        Start the MeshWatch monitoring daemon (UI opt-in)")
+	fmt.Fprintln(w, "  meshwatch test-notify --config <path>                      Send a test alert to configured notifiers")
 }
 
 func cmdKeygen(w io.Writer) error {
@@ -131,24 +133,145 @@ func cmdRun(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "config.yaml", "path to MeshWatch YAML configuration file")
+	uiAddr := fs.String("ui", os.Getenv("MESHWATCH_UI_ADDR"), "opt-in local web UI bind address (e.g. 127.0.0.1:8080; empty disables UI)")
+	uiToken := fs.String("ui-token", os.Getenv("MESHWATCH_UI_TOKEN"), "optional Bearer token required to access the local web UI")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	cfg, err := config.Load(*configPath)
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	// Strict CLI-only mode (default): zero HTTP server, fail fast on invalid config.
+	if *uiAddr == "" {
+		rawBytes, err := os.ReadFile(*configPath)
+		if err != nil {
+			return fmt.Errorf("read config %q: %w", *configPath, err)
+		}
+		cfg, err := config.Parse(rawBytes)
+		if err != nil {
+			return err
+		}
+		mgr := newAgentManager(ctx, *configPath, stdout)
+		defer mgr.Stop()
+		if err := mgr.ApplyConfig(ctx, rawBytes, cfg); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}
+
+	// Opt-in local web UI mode: supports Setup Mode if config is missing/placeholder
+	// and live hot-reload when saving configuration changes.
+	mgr := newAgentManager(ctx, *configPath, stdout)
+	defer mgr.Stop()
+
+	rawBytes, readErr := os.ReadFile(*configPath)
+	if readErr != nil {
+		mgr.setSetupMode("", fmt.Sprintf("read config %q: %v", *configPath, readErr))
+	} else {
+		cfg, parseErr := config.Parse(rawBytes)
+		if parseErr != nil {
+			mgr.setSetupMode(string(rawBytes), parseErr.Error())
+		} else if startErr := mgr.ApplyConfig(ctx, rawBytes, cfg); startErr != nil {
+			mgr.setSetupMode(string(rawBytes), startErr.Error())
+		}
+	}
+
+	srv, err := webui.NewServer(webui.ServerConfig{
+		Addr:       *uiAddr,
+		AuthToken:  *uiToken,
+		ConfigPath: *configPath,
+		Controller: mgr,
+		Logger:     mgr.currentLogger(),
+	})
 	if err != nil {
 		return err
 	}
 
-	logger := newLogger(cfg.Logging, stdout)
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-
-	return runAgent(ctx, cfg, logger)
+	return srv.Serve(ctx)
 }
 
-func runAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	startedAt := time.Now()
+type runningInstance struct {
+	cfg       *config.Config
+	cipher    *mwcrypto.Cipher
+	scheduler *probes.Scheduler
+	pool      *transport.Pool
+	engine    *quorum.Engine
+	startedAt time.Time
+	cancel    context.CancelFunc
+	done      chan struct{}
+}
+
+type agentManager struct {
+	parentCtx  context.Context
+	configPath string
+	stdout     io.Writer
+
+	mu       sync.Mutex
+	cfg      *config.Config
+	rawYAML  string
+	setupErr string
+	inst     *runningInstance
+	logger   *slog.Logger
+}
+
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (sw *syncWriter) Write(p []byte) (int, error) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.w.Write(p)
+}
+
+func newAgentManager(parentCtx context.Context, configPath string, stdout io.Writer) *agentManager {
+	sw := &syncWriter{w: stdout}
+	return &agentManager{
+		parentCtx:  parentCtx,
+		configPath: configPath,
+		stdout:     sw,
+		logger:     newLogger(config.LoggingConfig{Level: "info", Format: "text"}, sw),
+	}
+}
+
+func (m *agentManager) currentLogger() *slog.Logger {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.logger
+}
+
+func (m *agentManager) setSetupMode(rawYAML, errMsg string) {
+	m.mu.Lock()
+	m.rawYAML = rawYAML
+	m.setupErr = errMsg
+	logger := m.logger
+	m.mu.Unlock()
+	logger.Warn("starting MeshWatch web UI in setup mode", "config_path", m.configPath, "reason", errMsg)
+}
+
+func (m *agentManager) Stop() {
+	m.mu.Lock()
+	inst := m.inst
+	m.inst = nil
+	m.mu.Unlock()
+
+	if inst != nil {
+		inst.cancel()
+		<-inst.done
+	}
+}
+
+func (m *agentManager) CurrentConfig() (*config.Config, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg, m.rawYAML
+}
+
+func (m *agentManager) ApplyConfig(_ context.Context, rawYAML []byte, cfg *config.Config) error {
+	logger := newLogger(cfg.Logging, m.stdout)
 
 	cipher, err := mwcrypto.NewCipher(cfg.Node.PSKBytes)
 	if err != nil {
@@ -192,14 +315,39 @@ func runAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		Notifier:        notifiers,
 		Logger:          logger,
 	})
-	defer engine.Stop()
 
 	scheduler := probes.NewScheduler(scheduledProbes, logger)
-	scheduler.Start(ctx)
-	defer scheduler.Stop()
 
-	pool.Start(ctx)
-	defer pool.Stop()
+	runCtx, cancel := context.WithCancel(m.parentCtx)
+	inst := &runningInstance{
+		cfg:       cfg,
+		cipher:    cipher,
+		scheduler: scheduler,
+		pool:      pool,
+		engine:    engine,
+		startedAt: time.Now(),
+		cancel:    cancel,
+		done:      make(chan struct{}),
+	}
+
+	// Swap out previous instance cleanly before starting the new runtime.
+	m.mu.Lock()
+	prev := m.inst
+	m.inst = inst
+	m.cfg = cfg
+	m.rawYAML = string(rawYAML)
+	m.setupErr = ""
+	m.logger = logger
+	m.mu.Unlock()
+
+	if prev != nil {
+		logger.Info("reloading MeshWatch agent with updated configuration")
+		prev.cancel()
+		<-prev.done
+	}
+
+	scheduler.Start(runCtx)
+	pool.Start(runCtx)
 
 	logger.Info("MeshWatch agent started",
 		"node", cfg.Node.Name,
@@ -213,37 +361,48 @@ func runAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		"peer_timeout", cfg.Node.PeerTimeout,
 	)
 
-	// Give probes & relays a brief startup window before sending the initial heartbeat.
+	go runInstanceLoop(runCtx, inst, logger)
+	return nil
+}
+
+func runInstanceLoop(ctx context.Context, inst *runningInstance, logger *slog.Logger) {
+	defer close(inst.done)
+	defer inst.pool.Stop()
+	defer inst.scheduler.Stop()
+	defer inst.engine.Stop()
+
+	cfg := inst.cfg
+
 	initCtx, initCancel := context.WithTimeout(ctx, 5*time.Second)
-	_ = scheduler.WaitInitial(initCtx)
-	_ = pool.WaitConnected(initCtx, 1)
+	_ = inst.scheduler.WaitInitial(initCtx)
+	_ = inst.pool.WaitConnected(initCtx, 1)
 	initCancel()
 
 	publishHeartbeat := func() {
-		results, overallOK := scheduler.Snapshot()
+		results, overallOK := inst.scheduler.Snapshot()
 		hb := transport.HeartbeatPayload{
 			Type:      transport.TypeHeartbeat,
 			NodeName:  cfg.Node.Name,
 			TS:        time.Now().Unix(),
-			UptimeSec: int64(time.Since(startedAt).Seconds()),
+			UptimeSec: int64(time.Since(inst.startedAt).Seconds()),
 			OverallOK: overallOK,
 			Probes:    results,
 		}
 		pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		if evID, err := pool.PublishHeartbeat(pubCtx, hb); err != nil {
+		if evID, err := inst.pool.PublishHeartbeat(pubCtx, hb); err != nil {
 			logger.Warn("failed to publish heartbeat", "err", err)
 		} else {
 			logger.Debug("heartbeat published",
 				"event_id", evID,
 				"overall_ok", overallOK,
 				"probes", len(results),
-				"connected_relays", pool.ConnectedRelays(),
+				"connected_relays", inst.pool.ConnectedRelays(),
 			)
 		}
 	}
 
-	if ctx.Err() == nil && pool.ConnectedRelays() > 0 {
+	if ctx.Err() == nil && inst.pool.ConnectedRelays() > 0 {
 		publishHeartbeat()
 	}
 
@@ -260,19 +419,71 @@ func runAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("shutting down MeshWatch agent")
-			return nil
-		case msg, ok := <-pool.Messages():
+			logger.Info("stopping MeshWatch agent instance", "node", cfg.Node.Name)
+			return
+		case msg, ok := <-inst.pool.Messages():
 			if !ok {
-				return nil
+				return
 			}
-			engine.HandleMessage(ctx, msg)
+			inst.engine.HandleMessage(ctx, msg)
 		case <-hbTicker.C:
 			publishHeartbeat()
 		case <-timeoutTicker.C:
-			engine.CheckTimeouts(ctx)
+			inst.engine.CheckTimeouts(ctx)
 		}
 	}
+}
+
+func (m *agentManager) Status() webui.RuntimeStatus {
+	m.mu.Lock()
+	inst := m.inst
+	setupErr := m.setupErr
+	m.mu.Unlock()
+
+	if inst == nil {
+		return webui.RuntimeStatus{
+			Mode:           "setup",
+			SetupError:     setupErr,
+			ConfigPath:     m.configPath,
+			ConfigWritable: webui.IsConfigPathWritable(m.configPath),
+			OverallOK:      false,
+		}
+	}
+
+	probeResults, overallOK := inst.scheduler.Snapshot()
+	return webui.RuntimeStatus{
+		Mode:            "running",
+		ConfigPath:      m.configPath,
+		ConfigWritable:  webui.IsConfigPathWritable(m.configPath),
+		NodeName:        inst.cfg.Node.Name,
+		PublicKeyHex:    inst.cfg.Node.PublicKeyHex,
+		TopicTag:        inst.cipher.TopicTag(),
+		StartedAt:       inst.startedAt,
+		UptimeSec:       int64(time.Since(inst.startedAt).Seconds()),
+		HeartbeatSec:    int64(inst.cfg.Node.HeartbeatInterval.Seconds()),
+		PeerTimeoutSec:  int64(inst.cfg.Node.PeerTimeout.Seconds()),
+		OverallOK:       overallOK,
+		Muted:           inst.engine.IsMuted(),
+		AutoMuteTargets: append([]string(nil), inst.cfg.AutoMute.Targets...),
+		Relays:          inst.pool.RelayStatuses(),
+		Probes:          probeResults,
+		Peers:           inst.engine.PeerStatuses(),
+		Notifications: webui.NotificationsStatus{
+			NtfyEnabled:   inst.cfg.Notifications.Ntfy.Enabled,
+			PhotonEnabled: inst.cfg.Notifications.PhotonIMessage.Enabled,
+		},
+	}
+}
+
+func (m *agentManager) CheckAutoMute(ctx context.Context) (bool, error) {
+	m.mu.Lock()
+	inst := m.inst
+	m.mu.Unlock()
+
+	if inst == nil {
+		return false, errors.New("agent en mode initialisation : enregistrez d'abord une configuration valide")
+	}
+	return inst.engine.CheckAutoMute(ctx), nil
 }
 
 func newLogger(lc config.LoggingConfig, w io.Writer) *slog.Logger {

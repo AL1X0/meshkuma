@@ -12,6 +12,7 @@ import (
 
 	"meshwatch/internal/config"
 	"meshwatch/internal/notify"
+	"meshwatch/internal/probes"
 	"meshwatch/internal/transport"
 )
 
@@ -62,8 +63,26 @@ type peerState struct {
 	everSeen    bool
 	online      bool
 	timedOut    bool
+	overallOK   bool
+	uptimeSec   int64
 	lastSeen    time.Time
 	probeStates map[string]bool
+	lastProbes  []probes.ProbeResult
+}
+
+// PeerStatus is a thread-safe snapshot of a peer's liveness and latest reported probes.
+type PeerStatus struct {
+	Name        string               `json:"name"`
+	NodeName    string               `json:"node_name"`
+	PubKeyHex   string               `json:"pubkey_hex"`
+	KumaPushURL string               `json:"kuma_push_url,omitempty"`
+	EverSeen    bool                 `json:"ever_seen"`
+	Online      bool                 `json:"online"`
+	TimedOut    bool                 `json:"timed_out"`
+	OverallOK   bool                 `json:"overall_ok"`
+	UptimeSec   int64                `json:"uptime_sec"`
+	LastSeen    *time.Time           `json:"last_seen,omitempty"`
+	Probes      []probes.ProbeResult `json:"probes"`
 }
 
 type claimRecord struct {
@@ -194,6 +213,43 @@ func (e *Engine) IsMuted() bool {
 	return e.muted
 }
 
+// PeerStatuses returns a deterministic snapshot of all configured peers sorted by name.
+func (e *Engine) PeerStatuses() []PeerStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	out := make([]PeerStatus, 0, len(e.peers))
+	for _, p := range e.peers {
+		var lastSeenPtr *time.Time
+		if !p.lastSeen.IsZero() {
+			t := p.lastSeen
+			lastSeenPtr = &t
+		}
+		copiedProbes := make([]probes.ProbeResult, len(p.lastProbes))
+		copy(copiedProbes, p.lastProbes)
+		out = append(out, PeerStatus{
+			Name:        p.cfg.Name,
+			NodeName:    p.nodeName,
+			PubKeyHex:   p.cfg.PubKeyHex,
+			KumaPushURL: p.cfg.KumaPushURL,
+			EverSeen:    p.everSeen,
+			Online:      p.online,
+			TimedOut:    p.timedOut,
+			OverallOK:   p.overallOK,
+			UptimeSec:   p.uptimeSec,
+			LastSeen:    lastSeenPtr,
+			Probes:      copiedProbes,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].PubKeyHex < out[j].PubKeyHex
+	})
+	return out
+}
+
 // CheckAutoMute verifies outbound WAN connectivity via TCP Dial (default 3s timeout)
 // against configured external targets. If all targets fail, the node enters muted=true
 // to prevent false alerts during a local fiber/internet outage.
@@ -287,7 +343,10 @@ func (e *Engine) handleHeartbeat(ctx context.Context, msg transport.IncomingMess
 	peer.everSeen = true
 	peer.online = true
 	peer.timedOut = false
+	peer.overallOK = hb.OverallOK
+	peer.uptimeSec = hb.UptimeSec
 	peer.lastSeen = now
+	peer.lastProbes = append([]probes.ProbeResult(nil), hb.Probes...)
 
 	var alertsToSchedule []notify.Alert
 
