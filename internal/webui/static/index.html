@@ -531,8 +531,8 @@
       <section class="card-panel section-card">
         <div class="band-head card-head-tight">
           <div>
-            <h2>Messages iMessage (passerelle Photon)</h2>
-            <p class="muted-copy">Optionnel, si vous utilisez une passerelle iMessage personnelle.</p>
+            <h2>Messages iMessage (Photon)</h2>
+            <p class="muted-copy">Compatible avec Photon Cloud (app.photon.codes) et Photon HTTP Proxy (imessage-swagger.photon.codes).</p>
           </div>
           <label class="switch-control">
             <input id="cfg-photon-enabled" type="checkbox">
@@ -541,37 +541,134 @@
           </label>
         </div>
 
-        <div class="form-grid three-col">
-          <label class="field">
-            <span class="field-label">Adresse de la passerelle</span>
-            <input id="cfg-photon-url" type="url" class="mono" placeholder="https://photon.exemple.fr/send">
+        <div class="form-grid two-col">
+          <label class="field span-2">
+            <span class="field-label">Mode de connexion Photon</span>
+            <select id="cfg-photon-mode">
+              <option value="cloud">Photon Cloud (app.photon.codes · Project ID + Clé API)</option>
+              <option value="proxy">Photon HTTP Proxy (serveur Mac / imessage-swagger.photon.codes)</option>
+              <option value="custom">Webhook HTTP personnalisé</option>
+            </select>
           </label>
-          <label class="field">
-            <span class="field-label">Numéro ou identifiant</span>
-            <input id="cfg-photon-recipient" type="text" class="mono" placeholder="+33600000000">
-          </label>
-          <div class="field">
-            <span class="field-label">Clé secrète</span>
-            <div class="input-with-action">
-              <input id="cfg-photon-token" type="password" class="mono" autocomplete="off">
-              <button type="button" class="field-action" data-toggle-secret="cfg-photon-token">Afficher</button>
-            </div>
-          </div>
         </div>
 
-        <details class="advanced-fold">
-          <summary>Options techniques Photon</summary>
-          <div class="form-grid two-col fold-body">
+        <!-- MODE CLOUD -->
+        <div id="photon-mode-cloud">
+          <ol class="guide-steps">
+            <li>Sur <strong>app.beta.photon.codes</strong>, ouvrez votre projet, allez dans <strong>iMessage</strong> et assignez une ligne à votre numéro ou email Apple.</li>
+            <li>Envoyez un premier message iMessage depuis votre iPhone vers cette ligne (requis pour les lignes partagées).</li>
+            <li>Collez votre <strong>Project ID</strong> (<code>pho_prj_...</code>), votre <strong>Clé API</strong> (<code>pho_sk_...</code>) et votre numéro/email ci-dessous.</li>
+          </ol>
+          <div class="form-grid three-col" style="margin-top:14px;">
             <label class="field">
-              <span class="field-label">Champ destinataire</span>
-              <input id="cfg-photon-rec-field" type="text" class="mono" placeholder="recipient">
+              <span class="field-label">Project ID Photon</span>
+              <input id="cfg-photon-project-id" type="text" class="mono" placeholder="pho_prj_...">
             </label>
+            <div class="field">
+              <span class="field-label">Clé API projet</span>
+              <div class="input-with-action">
+                <input id="cfg-photon-api-key" type="password" class="mono" autocomplete="off" placeholder="pho_sk_...">
+                <button type="button" class="field-action" data-toggle-secret="cfg-photon-api-key">Afficher</button>
+              </div>
+            </div>
             <label class="field">
-              <span class="field-label">Champ message</span>
-              <input id="cfg-photon-msg-field" type="text" class="mono" placeholder="message">
+              <span class="field-label">Votre numéro ou email iMessage</span>
+              <input id="cfg-photon-recipient" type="text" class="mono" placeholder="+33600000000 ou nom@icloud.com">
             </label>
           </div>
-        </details>
+          <details class="advanced-fold">
+            <summary>Options avancées Photon Cloud (API URL, Space ID, Sender ID)</summary>
+            <div class="form-grid three-col fold-body">
+              <label class="field">
+                <span class="field-label">URL API Photon</span>
+                <input id="cfg-photon-cloud-url" type="url" class="mono" placeholder="https://api.photon.codes/v1">
+              </label>
+              <label class="field">
+                <span class="field-label">Sender ID (optionnel, détecté auto)</span>
+                <input id="cfg-photon-sender-id" type="text" class="mono" placeholder="pho_usr_...">
+              </label>
+              <label class="field">
+                <span class="field-label">Space ID (optionnel, détecté auto)</span>
+                <input id="cfg-photon-space-id" type="text" class="mono" placeholder="pho_spc_...">
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <!-- MODE PROXY (Advanced iMessage HTTP Proxy) -->
+        <div id="photon-mode-proxy" hidden>
+          <ol class="guide-steps">
+            <li>Indiquez l'adresse et la clé API de votre serveur <strong>Advanced iMessage Kit</strong> (MeshWatch génère automatiquement le jeton Base64 requis).</li>
+            <li>Indiquez le destinataire : numéro (<code>+336...</code>), email Apple ou groupe (<code>group:...</code>).</li>
+          </ol>
+          <div class="form-grid three-col" style="margin-top:14px;">
+            <label class="field">
+              <span class="field-label">URL de votre serveur Mac</span>
+              <input id="cfg-photon-server-url" type="url" class="mono" placeholder="https://mon-serveur-imessage.exemple.com">
+            </label>
+            <div class="field">
+              <span class="field-label">Clé API du serveur</span>
+              <div class="input-with-action">
+                <input id="cfg-photon-proxy-key" type="password" class="mono" autocomplete="off" placeholder="Clé API Advanced iMessage Kit">
+                <button type="button" class="field-action" data-toggle-secret="cfg-photon-proxy-key">Afficher</button>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">Destinataire (to)</span>
+              <input id="cfg-photon-proxy-recipient" type="text" class="mono" placeholder="+33600000000 ou nom@icloud.com">
+            </label>
+          </div>
+          <details class="advanced-fold">
+            <summary>Options avancées Proxy (URL proxy auto-hébergé ou jeton Base64 direct)</summary>
+            <div class="form-grid two-col fold-body">
+              <label class="field">
+                <span class="field-label">URL du HTTP Proxy</span>
+                <input id="cfg-photon-proxy-url" type="url" class="mono" placeholder="https://imessage-swagger.photon.codes">
+              </label>
+              <div class="field">
+                <span class="field-label">Jeton Base64 pré-généré (optionnel)</span>
+                <div class="input-with-action">
+                  <input id="cfg-photon-proxy-token" type="password" class="mono" autocomplete="off" placeholder="Remplace serveur + clé si rempli">
+                  <button type="button" class="field-action" data-toggle-secret="cfg-photon-proxy-token">Afficher</button>
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- MODE CUSTOM WEBHOOK -->
+        <div id="photon-mode-custom" hidden>
+          <div class="form-grid three-col">
+            <label class="field">
+              <span class="field-label">URL du webhook POST</span>
+              <input id="cfg-photon-url" type="url" class="mono" placeholder="https://mon-webhook.exemple.fr/send">
+            </label>
+            <label class="field">
+              <span class="field-label">Destinataire</span>
+              <input id="cfg-photon-custom-recipient" type="text" class="mono" placeholder="+33600000000">
+            </label>
+            <div class="field">
+              <span class="field-label">Jeton Bearer (optionnel)</span>
+              <div class="input-with-action">
+                <input id="cfg-photon-token" type="password" class="mono" autocomplete="off">
+                <button type="button" class="field-action" data-toggle-secret="cfg-photon-token">Afficher</button>
+              </div>
+            </div>
+          </div>
+          <details class="advanced-fold">
+            <summary>Noms des champs JSON personnalisés</summary>
+            <div class="form-grid two-col fold-body">
+              <label class="field">
+                <span class="field-label">Champ destinataire</span>
+                <input id="cfg-photon-rec-field" type="text" class="mono" placeholder="recipient">
+              </label>
+              <label class="field">
+                <span class="field-label">Champ message</span>
+                <input id="cfg-photon-msg-field" type="text" class="mono" placeholder="message">
+              </label>
+            </div>
+          </details>
+        </div>
       </section>
     </section>
 

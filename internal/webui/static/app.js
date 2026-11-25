@@ -1639,6 +1639,12 @@
         : "Mise à jour manuelle disponible sur GitHub.";
       settingsBtn.hidden = false;
       settingsBtn.textContent = info.can_auto_update ? "Mettre à jour maintenant" : "Ouvrir sur GitHub";
+    } else if (info.building) {
+      banner.hidden = true;
+      $("settings-update-headline").textContent = "Nouvelle version en cours de préparation";
+      $("settings-update-detail").textContent =
+        "GitHub compile actuellement une nouvelle image Docker (prête dans environ 1 minute). Cliquez sur Vérifier juste après.";
+      settingsBtn.hidden = true;
     } else {
       banner.hidden = true;
       $("settings-update-headline").textContent = "Votre MeshWatch est à jour";
@@ -1663,7 +1669,11 @@
 
     $("updating-overlay").hidden = false;
     $("updating-message").textContent =
-      "Téléchargement de la nouvelle version et redémarrage automatique. Ne fermez pas cette page...";
+      "Téléchargement de l'image " + info.image + " et redémarrage automatique. Ne fermez pas cette page...";
+
+    const prevVersion = (info.current_version || "") + ":" + (info.current_commit || "");
+    const prevStartedAt = (state.status && state.status.started_at) || "";
+    const targetCommit = info.latest_commit || "";
 
     try {
       const { ok, data } = await apiFetch("/api/update/apply", {
@@ -1676,25 +1686,38 @@
         return;
       }
 
-      const prevVersion = info.current_version + ":" + info.current_commit;
+      $("updating-message").textContent =
+        "Redémarrage sur la version " + info.latest_version + "... Reconnexion automatique dès qu'elle est prête.";
+
+      let sawDisconnect = false;
       const started = Date.now();
       const pollReconnect = async () => {
-        if (Date.now() - started > 120000) {
+        if (Date.now() - started > 150000) {
           $("updating-overlay").hidden = true;
-          showToast("warn", "Le redémarrage prend un peu plus de temps. Actualisez la page.");
+          showToast("warn", "Le redémarrage prend plus de temps que prévu. Actualisez la page.");
           return;
         }
         try {
-          const r = await apiFetch("/api/status");
-          if (r.ok) {
-            const cur = (r.data.version || "") + ":" + (r.data.commit || "");
-            if (cur !== prevVersion || Date.now() - started > 6000) {
-              window.location.reload();
+          const r = await apiFetch("/api/status?t=" + Date.now());
+          if (r.ok && r.data) {
+            const curVer = (r.data.version || "") + ":" + (r.data.commit || "");
+            const curStartedAt = r.data.started_at || "";
+            const commitMatched = targetCommit && r.data.commit && r.data.commit.startsWith(targetCommit);
+            const restarted =
+              commitMatched ||
+              (curVer !== prevVersion) ||
+              (prevStartedAt && curStartedAt && curStartedAt !== prevStartedAt) ||
+              (sawDisconnect && (r.data.uptime_sec || 0) < 30);
+
+            if (restarted) {
+              window.location.replace(window.location.pathname + "?v=" + Date.now());
               return;
             }
           }
-        } catch (_) {}
-        setTimeout(pollReconnect, 1800);
+        } catch (_) {
+          sawDisconnect = true;
+        }
+        setTimeout(pollReconnect, 1500);
       };
       setTimeout(pollReconnect, 2500);
     } catch (err) {
@@ -1730,9 +1753,29 @@
 
     const photon = (cfg.notifications && cfg.notifications.photon_imessage) || {};
     $("cfg-photon-enabled").checked = Boolean(photon.enabled);
-    $("cfg-photon-url").value = photon.url || "";
+    const pMode = inferPhotonMode(photon);
+    $("cfg-photon-mode").value = pMode;
+    syncPhotonModeVisibility(pMode);
+
+    // Cloud fields
+    $("cfg-photon-project-id").value = photon.project_id || "";
+    $("cfg-photon-api-key").value = photon.api_key || (pMode === "cloud" ? photon.token || "" : "");
     $("cfg-photon-recipient").value = photon.recipient || "";
-    $("cfg-photon-token").value = photon.token || "";
+    $("cfg-photon-cloud-url").value = pMode === "cloud" ? (photon.url || "https://api.photon.codes/v1") : "https://api.photon.codes/v1";
+    $("cfg-photon-sender-id").value = photon.sender_id || "";
+    $("cfg-photon-space-id").value = photon.space_id || "";
+
+    // Proxy fields
+    $("cfg-photon-server-url").value = photon.server_url || "";
+    $("cfg-photon-proxy-key").value = pMode === "proxy" ? (photon.api_key || "") : "";
+    $("cfg-photon-proxy-recipient").value = photon.recipient || "";
+    $("cfg-photon-proxy-url").value = pMode === "proxy" ? (photon.url || "https://imessage-swagger.photon.codes") : "https://imessage-swagger.photon.codes";
+    $("cfg-photon-proxy-token").value = pMode === "proxy" ? (photon.token || "") : "";
+
+    // Custom webhook fields
+    $("cfg-photon-url").value = pMode === "custom" ? (photon.url || "") : "";
+    $("cfg-photon-custom-recipient").value = photon.recipient || "";
+    $("cfg-photon-token").value = pMode === "custom" ? (photon.token || "") : "";
     $("cfg-photon-rec-field").value = photon.recipient_field || "recipient";
     $("cfg-photon-msg-field").value = photon.message_field || "message";
 
@@ -1753,6 +1796,63 @@
     updateInviteCodeDisplay();
     renderPeersList();
     renderManagedProbes();
+  }
+
+  function inferPhotonMode(ph) {
+    if (!ph) return "cloud";
+    const m = String(ph.mode || "").toLowerCase().trim();
+    if (m === "cloud" || m === "proxy" || m === "custom") return m;
+    if (ph.project_id || String(ph.api_key || "").startsWith("pho_") || String(ph.url || "").includes("api.photon.codes")) {
+      return "cloud";
+    }
+    if (ph.server_url || String(ph.url || "").includes("imessage-swagger.photon.codes")) {
+      return "proxy";
+    }
+    if (ph.url && ph.recipient) return "custom";
+    return "cloud";
+  }
+
+  function syncPhotonModeVisibility(mode) {
+    $("photon-mode-cloud").hidden = mode !== "cloud";
+    $("photon-mode-proxy").hidden = mode !== "proxy";
+    $("photon-mode-custom").hidden = mode !== "custom";
+  }
+
+  function readPhotonFields() {
+    const mode = $("cfg-photon-mode").value || "cloud";
+    const enabled = $("cfg-photon-enabled").checked;
+    if (mode === "cloud") {
+      return {
+        enabled,
+        mode: "cloud",
+        url: $("cfg-photon-cloud-url").value.trim() || "https://api.photon.codes/v1",
+        project_id: $("cfg-photon-project-id").value.trim(),
+        api_key: $("cfg-photon-api-key").value.trim(),
+        recipient: $("cfg-photon-recipient").value.trim(),
+        sender_id: $("cfg-photon-sender-id").value.trim(),
+        space_id: $("cfg-photon-space-id").value.trim()
+      };
+    }
+    if (mode === "proxy") {
+      return {
+        enabled,
+        mode: "proxy",
+        url: $("cfg-photon-proxy-url").value.trim() || "https://imessage-swagger.photon.codes",
+        server_url: $("cfg-photon-server-url").value.trim(),
+        api_key: $("cfg-photon-proxy-key").value.trim(),
+        token: $("cfg-photon-proxy-token").value.trim(),
+        recipient: $("cfg-photon-proxy-recipient").value.trim()
+      };
+    }
+    return {
+      enabled,
+      mode: "custom",
+      url: $("cfg-photon-url").value.trim(),
+      recipient: $("cfg-photon-custom-recipient").value.trim(),
+      token: $("cfg-photon-token").value.trim(),
+      recipient_field: $("cfg-photon-rec-field").value.trim() || "recipient",
+      message_field: $("cfg-photon-msg-field").value.trim() || "message"
+    };
   }
 
   function readGeneralFieldsIntoConfig() {
@@ -1782,14 +1882,7 @@
         topic: $("cfg-ntfy-topic").value.trim(),
         token: $("cfg-ntfy-token").value.trim()
       },
-      photon_imessage: {
-        enabled: $("cfg-photon-enabled").checked,
-        url: $("cfg-photon-url").value.trim(),
-        recipient: $("cfg-photon-recipient").value.trim(),
-        token: $("cfg-photon-token").value.trim(),
-        recipient_field: $("cfg-photon-rec-field").value.trim() || "recipient",
-        message_field: $("cfg-photon-msg-field").value.trim() || "message"
-      }
+      photon_imessage: readPhotonFields()
     };
   }
 
@@ -2099,6 +2192,11 @@
       e.target.value = "";
     });
 
+    $("cfg-photon-mode").addEventListener("change", () => {
+      syncPhotonModeVisibility($("cfg-photon-mode").value);
+      setDirty(true);
+    });
+
     // Track unsaved edits on general / alert / settings forms
     [
       "cfg-node-name",
@@ -2116,8 +2214,19 @@
       "cfg-ntfy-topic",
       "cfg-ntfy-token",
       "cfg-photon-enabled",
-      "cfg-photon-url",
+      "cfg-photon-project-id",
+      "cfg-photon-api-key",
       "cfg-photon-recipient",
+      "cfg-photon-cloud-url",
+      "cfg-photon-sender-id",
+      "cfg-photon-space-id",
+      "cfg-photon-server-url",
+      "cfg-photon-proxy-key",
+      "cfg-photon-proxy-recipient",
+      "cfg-photon-proxy-url",
+      "cfg-photon-proxy-token",
+      "cfg-photon-url",
+      "cfg-photon-custom-recipient",
       "cfg-photon-token",
       "cfg-photon-rec-field",
       "cfg-photon-msg-field"

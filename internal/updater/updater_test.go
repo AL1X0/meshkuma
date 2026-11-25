@@ -86,6 +86,71 @@ func TestCheckFallbackToMainCommit(t *testing.T) {
 	}
 }
 
+func TestCheckWaitsForSuccessfulCIBuild(t *testing.T) {
+	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/AL1X0/meshkuma/releases/latest":
+			http.NotFound(w, r)
+		case "/repos/AL1X0/meshkuma/actions/runs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"workflow_runs": []map[string]any{
+					{
+						"head_sha":    "9999999abcdef0000",
+						"status":      "in_progress",
+						"conclusion":  "",
+						"event":       "push",
+						"head_commit": map[string]any{"message": "feat: still compiling"},
+					},
+					{
+						"head_sha":    "1111111abcdef0000",
+						"status":      "completed",
+						"conclusion":  "success",
+						"event":       "push",
+						"head_commit": map[string]any{"message": "feat: ready build"},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ghMock.Close()
+
+	// Already on the last completed CI build (1111111), while 9999999 is still building:
+	// must NOT tell user to click update yet, must report Building=true!
+	u := New(Config{
+		Repo:          "AL1X0/meshkuma",
+		APIBaseURL:    ghMock.URL,
+		CurrentVer:    "main-1111111",
+		CurrentCommit: "1111111",
+	})
+	res, err := u.Check(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if res.UpdateAvailable {
+		t.Fatalf("must not advertise incomplete CI build as ready, got %+v", res)
+	}
+	if !res.Building {
+		t.Fatalf("expected Building=true while newer CI run is in_progress, got %+v", res)
+	}
+
+	// On an older build (0000000): must target the exact completed CI tag main-1111111.
+	uOld := New(Config{
+		Repo:          "AL1X0/meshkuma",
+		APIBaseURL:    ghMock.URL,
+		CurrentVer:    "main-0000000",
+		CurrentCommit: "0000000",
+	})
+	resOld, err := uOld.Check(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Check(old) error = %v", err)
+	}
+	if !resOld.UpdateAvailable || resOld.Image != "ghcr.io/al1x0/meshkuma:main-1111111" {
+		t.Fatalf("expected UpdateAvailable=true with exact tag main-1111111, got %+v", resOld)
+	}
+}
+
 func TestRunSelfUpdateHelperSuccess(t *testing.T) {
 	var steps []string
 	dockerMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

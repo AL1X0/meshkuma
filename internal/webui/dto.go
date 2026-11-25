@@ -105,7 +105,13 @@ type NtfyDTO struct {
 
 type PhotonDTO struct {
 	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	Mode           string `json:"mode,omitempty" yaml:"mode,omitempty"`
 	URL            string `json:"url,omitempty" yaml:"url,omitempty"`
+	ProjectID      string `json:"project_id,omitempty" yaml:"project_id,omitempty"`
+	APIKey         string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	ServerURL      string `json:"server_url,omitempty" yaml:"server_url,omitempty"`
+	SenderID       string `json:"sender_id,omitempty" yaml:"sender_id,omitempty"`
+	SpaceID        string `json:"space_id,omitempty" yaml:"space_id,omitempty"`
 	Token          string `json:"token,omitempty" yaml:"token,omitempty"`
 	Recipient      string `json:"recipient,omitempty" yaml:"recipient,omitempty"`
 	RecipientField string `json:"recipient_field,omitempty" yaml:"recipient_field,omitempty"`
@@ -201,7 +207,13 @@ func configToDTO(cfg *config.Config) ConfigDTO {
 			},
 			PhotonIMessage: PhotonDTO{
 				Enabled:        cfg.Notifications.PhotonIMessage.Enabled,
+				Mode:           cfg.Notifications.PhotonIMessage.Mode,
 				URL:            cfg.Notifications.PhotonIMessage.URL,
+				ProjectID:      cfg.Notifications.PhotonIMessage.ProjectID,
+				APIKey:         cfg.Notifications.PhotonIMessage.APIKey,
+				ServerURL:      cfg.Notifications.PhotonIMessage.ServerURL,
+				SenderID:       cfg.Notifications.PhotonIMessage.SenderID,
+				SpaceID:        cfg.Notifications.PhotonIMessage.SpaceID,
 				Token:          cfg.Notifications.PhotonIMessage.Token,
 				Recipient:      cfg.Notifications.PhotonIMessage.Recipient,
 				RecipientField: cfg.Notifications.PhotonIMessage.RecipientField,
@@ -350,8 +362,7 @@ func defaultTemplateDTO() ConfigDTO {
 		Probes: []ProbeDTO{},
 		Notifications: NotificationsDTO{
 			PhotonIMessage: PhotonDTO{
-				RecipientField: "recipient",
-				MessageField:   "message",
+				Mode: "cloud",
 			},
 		},
 	}

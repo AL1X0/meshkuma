@@ -140,14 +140,42 @@ type NtfyConfig struct {
 	Token   string `yaml:"token"`
 }
 
-// PhotonConfig configures the Photon iMessage gateway connector.
+// PhotonConfig configures the Photon iMessage notification connector.
+// Supported modes:
+//   - "cloud": Photon 2.0 Cloud API (https://api.photon.codes/v1) using project_id + api_key (pho_sk_...)
+//   - "proxy": Photon Advanced iMessage HTTP Proxy (https://imessage-swagger.photon.codes/send) using server_url + api_key (or pre-encoded token)
+//   - "custom": generic JSON webhook with configurable recipient_field / message_field
 type PhotonConfig struct {
 	Enabled        bool   `yaml:"enabled"`
+	Mode           string `yaml:"mode"`
 	URL            string `yaml:"url"`
+	ProjectID      string `yaml:"project_id"`
+	APIKey         string `yaml:"api_key"`
+	ServerURL      string `yaml:"server_url"`
+	SenderID       string `yaml:"sender_id"`
+	SpaceID        string `yaml:"space_id"`
 	Token          string `yaml:"token"`
 	Recipient      string `yaml:"recipient"`
 	RecipientField string `yaml:"recipient_field"`
 	MessageField   string `yaml:"message_field"`
+}
+
+// EffectiveMode infers the Photon transport mode ("cloud", "proxy", or "custom").
+func (p PhotonConfig) EffectiveMode() string {
+	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
+	case "cloud", "proxy", "custom":
+		return strings.ToLower(strings.TrimSpace(p.Mode))
+	}
+	if strings.TrimSpace(p.ProjectID) != "" ||
+		strings.HasPrefix(strings.TrimSpace(p.APIKey), "pho_") ||
+		strings.Contains(strings.ToLower(p.URL), "api.photon.codes") {
+		return "cloud"
+	}
+	if strings.TrimSpace(p.ServerURL) != "" ||
+		strings.Contains(strings.ToLower(p.URL), "imessage-swagger.photon.codes") {
+		return "proxy"
+	}
+	return "custom"
 }
 
 // Load reads, parses, and strictly validates a YAML config file from disk.
@@ -392,11 +420,43 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.Notifications.PhotonIMessage.Enabled {
-		if err := validateHTTPURL(c.Notifications.PhotonIMessage.URL); err != nil {
-			errs = append(errs, fmt.Errorf("notifications.photon_imessage.url: %w", err))
-		}
-		if strings.TrimSpace(c.Notifications.PhotonIMessage.Recipient) == "" {
-			errs = append(errs, errors.New("notifications.photon_imessage.recipient is required when enabled"))
+		ph := &c.Notifications.PhotonIMessage
+		mode := ph.EffectiveMode()
+		switch mode {
+		case "cloud":
+			if strings.TrimSpace(ph.URL) == "" {
+				ph.URL = "https://api.photon.codes/v1"
+			} else if err := validateHTTPURL(ph.URL); err != nil {
+				errs = append(errs, fmt.Errorf("notifications.photon_imessage.url: %w", err))
+			}
+			if strings.TrimSpace(ph.ProjectID) == "" {
+				errs = append(errs, errors.New("notifications.photon_imessage.project_id is required in cloud mode"))
+			}
+			if strings.TrimSpace(ph.APIKey) == "" && strings.TrimSpace(ph.Token) == "" {
+				errs = append(errs, errors.New("notifications.photon_imessage.api_key is required in cloud mode"))
+			}
+			if strings.TrimSpace(ph.Recipient) == "" && (strings.TrimSpace(ph.SpaceID) == "" || strings.TrimSpace(ph.SenderID) == "") {
+				errs = append(errs, errors.New("notifications.photon_imessage.recipient (or space_id + sender_id) is required in cloud mode"))
+			}
+		case "proxy":
+			if strings.TrimSpace(ph.URL) == "" {
+				ph.URL = "https://imessage-swagger.photon.codes"
+			} else if err := validateHTTPURL(ph.URL); err != nil {
+				errs = append(errs, fmt.Errorf("notifications.photon_imessage.url: %w", err))
+			}
+			if strings.TrimSpace(ph.Recipient) == "" {
+				errs = append(errs, errors.New("notifications.photon_imessage.recipient is required in proxy mode"))
+			}
+			if strings.TrimSpace(ph.Token) == "" && (strings.TrimSpace(ph.ServerURL) == "" || strings.TrimSpace(ph.APIKey) == "") {
+				errs = append(errs, errors.New("notifications.photon_imessage requires server_url + api_key (or token) in proxy mode"))
+			}
+		default:
+			if err := validateHTTPURL(ph.URL); err != nil {
+				errs = append(errs, fmt.Errorf("notifications.photon_imessage.url: %w", err))
+			}
+			if strings.TrimSpace(ph.Recipient) == "" {
+				errs = append(errs, errors.New("notifications.photon_imessage.recipient is required when enabled"))
+			}
 		}
 	}
 

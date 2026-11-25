@@ -65,7 +65,9 @@ notifications:
     url: "https://ntfy.sh/mon-topic-secret-meshwatch"
     token: ""
   photon_imessage:
-    enabled: true
-    url: "https://ton-gateway-photon.example/send"
-    token: "TON_TOKEN_PHOTON"
+    enabled: false
+    mode: "cloud"                               # "cloud" (app.photon.codes), "proxy" (imessage-swagger.photon.codes) ou "custom"
+    url: "https://api.photon.codes/v1"
+    project_id: "pho_prj_REMPLACER"
+    api_key: "pho_sk_REMPLACER"
     recipient: "+33600000000"

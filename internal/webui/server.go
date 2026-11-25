@@ -197,11 +197,8 @@ func (s *Server) serveStatic(fsHandler http.Handler) http.Handler {
 			writeJSONError(w, http.StatusNotFound, "unknown API endpoint")
 			return
 		}
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			w.Header().Set("Cache-Control", "no-store")
-		} else {
-			w.Header().Set("Cache-Control", "no-cache")
-		}
+		// Never cache embedded UI assets so browser picks up updates cleanly in a single reload.
+		w.Header().Set("Cache-Control", "no-store")
 		fsHandler.ServeHTTP(w, r)
 	})
 }
@@ -474,7 +471,13 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 			},
 			PhotonIMessage: config.PhotonConfig{
 				Enabled:        req.Notifications.PhotonIMessage.Enabled,
+				Mode:           strings.TrimSpace(req.Notifications.PhotonIMessage.Mode),
 				URL:            strings.TrimSpace(req.Notifications.PhotonIMessage.URL),
+				ProjectID:      strings.TrimSpace(req.Notifications.PhotonIMessage.ProjectID),
+				APIKey:         strings.TrimSpace(req.Notifications.PhotonIMessage.APIKey),
+				ServerURL:      strings.TrimSpace(req.Notifications.PhotonIMessage.ServerURL),
+				SenderID:       strings.TrimSpace(req.Notifications.PhotonIMessage.SenderID),
+				SpaceID:        strings.TrimSpace(req.Notifications.PhotonIMessage.SpaceID),
 				Token:          strings.TrimSpace(req.Notifications.PhotonIMessage.Token),
 				Recipient:      strings.TrimSpace(req.Notifications.PhotonIMessage.Recipient),
 				RecipientField: strings.TrimSpace(req.Notifications.PhotonIMessage.RecipientField),

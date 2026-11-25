@@ -183,3 +183,124 @@ func TestPhotonNotifierPayloadHeadersAndRetries(t *testing.T) {
 		t.Fatalf("500 attempts = %d, want 4 (1 initial + 3 retries)", failAttempts.Load())
 	}
 }
+
+func TestPhotonProxyModeFormat(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody map[string]string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true,"data":{}}`))
+	}))
+	defer srv.Close()
+
+	p := NewPhotonNotifier(config.PhotonConfig{
+		Enabled:   true,
+		Mode:      "proxy",
+		URL:       srv.URL,
+		ServerURL: "https://mac.example.com",
+		APIKey:    "secret-mac-key",
+		Recipient: "+33612345678",
+	})
+	p.backoffs = []time.Duration{5 * time.Millisecond}
+
+	err := p.Send(context.Background(), Alert{
+		IncidentID: "inc-proxy-1",
+		State:      StateDown,
+		NodeName:   "homelab-nord",
+		ProbeID:    "nas",
+		Summary:    "Disk alert",
+		Timestamp:  time.Now().UTC(),
+		ReportedBy: "mon-homelab",
+	})
+	if err != nil {
+		t.Fatalf("proxy Send() error = %v", err)
+	}
+	if gotPath != "/send" {
+		t.Fatalf("path = %q, want /send", gotPath)
+	}
+	// base64("https://mac.example.com|secret-mac-key")
+	wantAuth := "Bearer aHR0cHM6Ly9tYWMuZXhhbXBsZS5jb218c2VjcmV0LW1hYy1rZXk="
+	if gotAuth != wantAuth {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, wantAuth)
+	}
+	if gotBody["to"] != "+33612345678" || !strings.Contains(gotBody["text"], "Disk alert") {
+		t.Fatalf("unexpected proxy payload: %+v", gotBody)
+	}
+}
+
+func TestPhotonCloudV1AutoResolveAndSend(t *testing.T) {
+	var sentCount atomic.Int32
+	var gotIdem, gotVer, gotAuth string
+	var gotMsg map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/pho_prj_01test/users":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{"id": "pho_usr_agent1", "kind": "agent", "platform": "imessage", "handle": "+14155550100"},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/pho_prj_01test/users":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "pho_usr_peer1", "kind": "user", "platform": "imessage", "handle": "+33612345678",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/pho_prj_01test/spaces":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "pho_spc_direct1", "platform": "imessage",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/pho_prj_01test/messages":
+			sentCount.Add(1)
+			gotIdem = r.Header.Get("Idempotency-Key")
+			gotVer = r.Header.Get("Photon-Version")
+			_ = json.NewDecoder(r.Body).Decode(&gotMsg)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"pho_msg_1"}`))
+		default:
+			t.Errorf("unexpected Photon Cloud call: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := NewPhotonNotifier(config.PhotonConfig{
+		Enabled:   true,
+		Mode:      "cloud",
+		URL:       srv.URL + "/v1",
+		ProjectID: "pho_prj_01test",
+		APIKey:    "pho_sk_testkey",
+		Recipient: "+33612345678",
+	})
+	p.backoffs = []time.Duration{5 * time.Millisecond}
+
+	err := p.Send(context.Background(), Alert{
+		IncidentID: "inc:cloud:42",
+		State:      StateDown,
+		NodeName:   "homelab-sud",
+		ProbeID:    "syno",
+		Summary:    "Temp 62C",
+		Timestamp:  time.Now().UTC(),
+		ReportedBy: "mon-homelab",
+	})
+	if err != nil {
+		t.Fatalf("cloud Send() error = %v", err)
+	}
+	if sentCount.Load() != 1 {
+		t.Fatalf("sentCount = %d, want 1", sentCount.Load())
+	}
+	if gotAuth != "Bearer pho_sk_testkey" || gotVer != photonAPIVersion || gotIdem != "mw:down:inc:cloud:42" {
+		t.Fatalf("unexpected headers: auth=%q ver=%q idem=%q", gotAuth, gotVer, gotIdem)
+	}
+	if gotMsg["spaceId"] != "pho_spc_direct1" || gotMsg["senderId"] != "pho_usr_agent1" {
+		t.Fatalf("unexpected cloud message target: %+v", gotMsg)
+	}
+	content, _ := gotMsg["content"].(map[string]any)
+	if content["type"] != "text" || content["format"] != "plain" || !strings.Contains(content["text"].(string), "Temp 62C") {
+		t.Fatalf("unexpected cloud content: %+v", content)
+	}
+}

@@ -28,6 +28,7 @@ type CheckResult struct {
 	LatestVersion   string    `json:"latest_version"`
 	LatestCommit    string    `json:"latest_commit,omitempty"`
 	UpdateAvailable bool      `json:"update_available"`
+	Building        bool      `json:"building,omitempty"`
 	ReleaseName     string    `json:"release_name,omitempty"`
 	ReleaseNotes    string    `json:"release_notes,omitempty"`
 	ReleaseURL      string    `json:"release_url,omitempty"`
@@ -150,22 +151,44 @@ func (u *Updater) Check(ctx context.Context, force bool) (CheckResult, error) {
 		res.ReleaseNotes = trimNotes(rel.Body)
 		res.ReleaseURL = rel.HTMLURL
 		res.UpdateAvailable = isNewerVersion(u.currentVer, rel.TagName)
+		if rel.TagName != "" {
+			repoBase, _ := splitImageRef(u.image)
+			res.Image = repoBase + ":" + rel.TagName
+		}
 	} else {
-		// No tagged release yet: compare against latest commit on main branch.
-		commit, err := u.fetchLatestMainCommit(ctx)
-		if err != nil {
-			return res, err
+		// No tagged release yet: prefer the latest commit on main whose CI Docker image
+		// actually succeeded and was pushed to GHCR, preventing stale pulls during builds.
+		readyRun, building, hasRuns := u.fetchLatestReadyMainBuild(ctx)
+		res.Building = building
+		if hasRuns {
+			short := readyRun.HeadSHA
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			res.LatestCommit = short
+			res.LatestVersion = "main@" + short
+			res.ReleaseName = firstLine(readyRun.HeadCommit.Message)
+			res.ReleaseNotes = trimNotes(readyRun.HeadCommit.Message)
+			res.ReleaseURL = fmt.Sprintf("https://github.com/%s/commit/%s", u.repo, readyRun.HeadSHA)
+			res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(readyRun.HeadSHA, u.currentCommit)
+			repoBase, _ := splitImageRef(u.image)
+			res.Image = repoBase + ":main-" + short
+		} else {
+			commit, err := u.fetchLatestMainCommit(ctx)
+			if err != nil {
+				return res, err
+			}
+			short := commit.SHA
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			res.LatestCommit = short
+			res.LatestVersion = "main@" + short
+			res.ReleaseName = firstLine(commit.Commit.Message)
+			res.ReleaseNotes = trimNotes(commit.Commit.Message)
+			res.ReleaseURL = commit.HTMLURL
+			res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(commit.SHA, u.currentCommit)
 		}
-		short := commit.SHA
-		if len(short) > 7 {
-			short = short[:7]
-		}
-		res.LatestCommit = short
-		res.LatestVersion = "main@" + short
-		res.ReleaseName = firstLine(commit.Commit.Message)
-		res.ReleaseNotes = trimNotes(commit.Commit.Message)
-		res.ReleaseURL = commit.HTMLURL
-		res.UpdateAvailable = u.currentCommit != "" && u.currentCommit != "none" && u.currentCommit != "dev" && !strings.HasPrefix(commit.SHA, u.currentCommit)
 	}
 
 	u.mu.Lock()
@@ -210,6 +233,59 @@ func (u *Updater) fetchLatestRelease(ctx context.Context) (ghRelease, bool, erro
 		return ghRelease{}, false, err
 	}
 	return rel, true, nil
+}
+
+type ghWorkflowRun struct {
+	HeadSHA    string `json:"head_sha"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	Event      string `json:"event"`
+	HeadCommit struct {
+		Message string `json:"message"`
+	} `json:"head_commit"`
+}
+
+func (u *Updater) fetchLatestReadyMainBuild(ctx context.Context) (ready ghWorkflowRun, building bool, ok bool) {
+	endpoint := fmt.Sprintf("%s/repos/%s/actions/runs?branch=main&event=push&per_page=10", u.apiBaseURL, u.repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ghWorkflowRun{}, false, false
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "MeshWatch-Updater/1.0")
+
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return ghWorkflowRun{}, false, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ghWorkflowRun{}, false, false
+	}
+
+	var payload struct {
+		WorkflowRuns []ghWorkflowRun `json:"workflow_runs"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 512*1024)).Decode(&payload); err != nil {
+		return ghWorkflowRun{}, false, false
+	}
+	if len(payload.WorkflowRuns) == 0 {
+		return ghWorkflowRun{}, false, false
+	}
+
+	// Check if the newest push run is still compiling/publishing.
+	newest := payload.WorkflowRuns[0]
+	if (newest.Status == "queued" || newest.Status == "in_progress") &&
+		(u.currentCommit == "" || !strings.HasPrefix(newest.HeadSHA, u.currentCommit)) {
+		building = true
+	}
+
+	for _, run := range payload.WorkflowRuns {
+		if run.Status == "completed" && run.Conclusion == "success" && run.HeadSHA != "" {
+			return run, building, true
+		}
+	}
+	return ghWorkflowRun{}, building, false
 }
 
 type ghCommit struct {
