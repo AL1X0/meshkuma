@@ -535,3 +535,166 @@ func TestNormalizeDMChatGUID(t *testing.T) {
 		}
 	}
 }
+
+func TestPhotonSpectrumAutoRegisterSharedUserOnTargetNotAllowed(t *testing.T) {
+	projectUUID := "33333333-4444-4555-8666-777777777777"
+	secret := "test_spectrum_secret_key"
+	wantBasic := "Basic " + base64.StdEncoding.EncodeToString([]byte(projectUUID+":"+secret))
+
+	var tokenCalls, userCalls, grpcCalls atomic.Int32
+	var gotChatGUID, gotSecondAuth string
+
+	spectrumAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/projects/"+projectUUID+"/imessage/tokens":
+			n := tokenCalls.Add(1)
+			tok := "light_tok_1"
+			if n >= 2 {
+				tok = "light_tok_2"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"succeed": true,
+				"data": map[string]any{
+					"type":      "shared",
+					"token":     tok,
+					"expiresIn": 3600,
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/projects/"+projectUUID+"/users/":
+			userCalls.Add(1)
+			if got := r.Header.Get("Authorization"); got != wantBasic {
+				t.Errorf("users Basic auth = %q, want %q", got, wantBasic)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode user body: %v", err)
+			}
+			if body["type"] != "shared" || body["phoneNumber"] != "+33600000001" {
+				t.Errorf("unexpected user payload: %+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"succeed": true,
+				"data": map[string]any{
+					"id":                  "usr-1",
+					"phoneNumber":         "+33600000001",
+					"assignedPhoneNumber": "+14155550123",
+				},
+			})
+		default:
+			t.Errorf("unexpected Spectrum path: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer spectrumAPI.Close()
+
+	grpcSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		n := grpcCalls.Add(1)
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Add("Trailer", "Grpc-Status")
+		if n == 1 {
+			w.Header().Add("Trailer", "Grpc-Message")
+			w.WriteHeader(http.StatusOK)
+			w.Header().Set("Grpc-Status", "7")
+			w.Header().Set("Grpc-Message", "%5Bspectrum-imessage%5D%20Target%20not%20allowed%20for%20this%20project")
+			return
+		}
+		gotSecondAuth = r.Header.Get("Authorization")
+		if msg, ok := unframeGRPC(body); ok {
+			if b, ok := readProtoFieldBytes(msg, 1); ok {
+				gotChatGUID = string(b)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(frameGRPC(nil))
+		w.Header().Set("Grpc-Status", "0")
+	}))
+	grpcSrv.EnableHTTP2 = true
+	grpcSrv.StartTLS()
+	defer grpcSrv.Close()
+
+	p := NewPhotonNotifier(config.PhotonConfig{
+		Enabled:   true,
+		Mode:      "cloud",
+		URL:       spectrumAPI.URL,
+		ProjectID: projectUUID,
+		APIKey:    secret,
+		Recipient: "+33600000001",
+	})
+	p.spectrumIMessageBaseURL = grpcSrv.URL
+	p.grpcClient = grpcSrv.Client()
+	p.backoffs = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
+
+	if err := p.Send(context.Background(), Alert{IncidentID: "reg-1", State: StateResolved, Summary: "Test"}); err != nil {
+		t.Fatalf("expected Send() to succeed after auto-registering user, got error: %v", err)
+	}
+	if tokenCalls.Load() != 2 {
+		t.Fatalf("tokenCalls = %d, want 2", tokenCalls.Load())
+	}
+	if userCalls.Load() != 1 {
+		t.Fatalf("userCalls = %d, want 1", userCalls.Load())
+	}
+	if grpcCalls.Load() != 2 {
+		t.Fatalf("grpcCalls = %d, want 2", grpcCalls.Load())
+	}
+	if gotSecondAuth != "Bearer light_tok_2" {
+		t.Fatalf("second gRPC Authorization = %q, want Bearer light_tok_2", gotSecondAuth)
+	}
+	if gotChatGUID != "any;-;+33600000001" {
+		t.Fatalf("second chat_guid = %q, want any;-;+33600000001", gotChatGUID)
+	}
+}
+
+func TestPhotonSpectrumSharedUserEmailHintOnTargetNotAllowed(t *testing.T) {
+	projectUUID := "44444444-5555-4666-8777-888888888888"
+	var userCalls atomic.Int32
+
+	spectrumAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/projects/" + projectUUID + "/imessage/tokens":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"succeed": true,
+				"data":    map[string]any{"type": "shared", "token": "tok", "expiresIn": 3600},
+			})
+		case "/projects/" + projectUUID + "/users/":
+			userCalls.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer spectrumAPI.Close()
+
+	grpcSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Add("Trailer", "Grpc-Status")
+		w.Header().Add("Trailer", "Grpc-Message")
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Grpc-Status", "7")
+		w.Header().Set("Grpc-Message", "%5Bspectrum-imessage%5D%20Target%20not%20allowed%20for%20this%20project")
+	}))
+	grpcSrv.EnableHTTP2 = true
+	grpcSrv.StartTLS()
+	defer grpcSrv.Close()
+
+	p := NewPhotonNotifier(config.PhotonConfig{
+		Enabled:   true,
+		Mode:      "cloud",
+		URL:       spectrumAPI.URL,
+		ProjectID: projectUUID,
+		APIKey:    "sec",
+		Recipient: "user@icloud.com",
+	})
+	p.spectrumIMessageBaseURL = grpcSrv.URL
+	p.grpcClient = grpcSrv.Client()
+	p.backoffs = []time.Duration{5 * time.Millisecond}
+
+	err := p.Send(context.Background(), Alert{IncidentID: "email-1", State: StateDown, Summary: "Test"})
+	if userCalls.Load() != 0 {
+		t.Fatalf("userCalls = %d, want 0 for non-E.164 email target", userCalls.Load())
+	}
+	if err == nil || !strings.Contains(err.Error(), "app.photon.codes") || !strings.Contains(err.Error(), "Users") {
+		t.Fatalf("expected actionable app.photon.codes Users error hint, got %v", err)
+	}
+}

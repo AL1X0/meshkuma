@@ -207,7 +207,7 @@ func (p *PhotonNotifier) sendSpectrum(ctx context.Context, alert Alert, text str
 	idemKey := buildIdempotencyKey(alert)
 	reqProto := encodeSendTextMessageRequest(chatGUID, text, idemKey)
 
-	return p.postSpectrumGRPC(ctx, host, token, idemKey, reqProto)
+	return p.postSpectrumGRPC(ctx, lineType, host, token, chatGUID, idemKey, reqProto)
 }
 
 type spectrumTokenResponse struct {
@@ -369,8 +369,84 @@ func normalizeDMChatGUID(recipient string) string {
 	}
 }
 
-func (p *PhotonNotifier) postSpectrumGRPC(ctx context.Context, host, token, idemKey string, reqProto []byte) error {
+func extractSpectrumAddress(chatGUID string) string {
+	s := strings.TrimSpace(chatGUID)
+	if idx := strings.LastIndex(s, ";"); idx >= 0 {
+		return strings.TrimSpace(s[idx+1:])
+	}
+	return s
+}
+
+func isE164Phone(s string) bool {
+	if len(s) < 8 || len(s) > 16 || s[0] != '+' || s[1] < '1' || s[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+type spectrumCreateUserResponse struct {
+	Succeed bool   `json:"succeed"`
+	Message string `json:"message"`
+	Data    struct {
+		ID                  string `json:"id"`
+		PhoneNumber         string `json:"phoneNumber"`
+		AssignedPhoneNumber string `json:"assignedPhoneNumber"`
+	} `json:"data"`
+}
+
+func (p *PhotonNotifier) ensureSpectrumSharedUser(ctx context.Context, phoneNumber string) (string, error) {
+	endpoint := fmt.Sprintf("%s/projects/%s/users/", p.spectrumBaseURL(), url.PathEscape(p.projectID))
+	creds := base64.StdEncoding.EncodeToString([]byte(p.projectID + ":" + p.apiKey))
+
+	payload, err := json.Marshal(struct {
+		Type        string `json:"type"`
+		PhoneNumber string `json:"phoneNumber"`
+	}{
+		Type:        "shared",
+		PhoneNumber: phoneNumber,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Basic "+creds)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "MeshWatch/1.0")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("HTTP %d (%s)", resp.StatusCode, formatPhotonProblem(resp.StatusCode, respBody))
+	}
+
+	var parsed spectrumCreateUserResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("réponse invalide (%w)", err)
+	}
+	if !parsed.Succeed {
+		return "", errors.New(fallbackText(strings.TrimSpace(parsed.Message), "refus Spectrum"))
+	}
+	return strings.TrimSpace(parsed.Data.AssignedPhoneNumber), nil
+}
+
+func (p *PhotonNotifier) postSpectrumGRPC(ctx context.Context, lineType, host, token, chatGUID, idemKey string, reqProto []byte) error {
 	refreshedAuth := false
+	registeredUser := false
+	autoRegisteredLine := ""
 	return retryWithBackoff(ctx, p.backoffs, func(_ int) (bool, error) {
 		endpoint := strings.TrimRight(host, "/") + "/photon.imessage.v1.MessageService/SendTextMessage"
 		_, grpcStatus, grpcMsg, err := p.doSingleGRPCCall(ctx, endpoint, token, idemKey, reqProto)
@@ -379,6 +455,33 @@ func (p *PhotonNotifier) postSpectrumGRPC(ctx context.Context, host, token, idem
 		}
 		if grpcStatus == "" || grpcStatus == "0" {
 			return false, nil
+		}
+		if grpcStatus == "7" && lineType == "shared" && strings.Contains(strings.ToLower(grpcMsg), "not allowed") {
+			if !registeredUser {
+				registeredUser = true
+				addr := extractSpectrumAddress(chatGUID)
+				if isE164Phone(addr) {
+					assignedLine, regErr := p.ensureSpectrumSharedUser(ctx, addr)
+					if regErr != nil {
+						return false, fmt.Errorf("photon spectrum (gRPC 7) : %s — ajout automatique dans Users échoué (%v). Ajoutez ce destinataire dans app.photon.codes → Users", humanizeGRPCError(grpcStatus, grpcMsg), regErr)
+					}
+					autoRegisteredLine = assignedLine
+					p.clearSpectrumTokenCache()
+					_, newHost, newTok, tokErr := p.getSpectrumIMessageToken(ctx, true)
+					if tokErr == nil {
+						token = newTok
+						if newHost != "" {
+							host = newHost
+						}
+					}
+					return true, fmt.Errorf("photon spectrum: destinataire ajouté au projet, nouvelle tentative (%s)", humanizeGRPCError(grpcStatus, grpcMsg))
+				}
+				return false, fmt.Errorf("photon spectrum (gRPC 7) : %s — sur une ligne partagée Photon (Free/Pro), ajoutez ce destinataire dans app.photon.codes → Users (ou utilisez un numéro au format +33...)", humanizeGRPCError(grpcStatus, grpcMsg))
+			}
+			if autoRegisteredLine != "" {
+				return false, fmt.Errorf("photon spectrum (gRPC 7) : %s — numéro ajouté dans Users (ligne assignée %s), vérifiez votre identifiant iMessage réel sur debug.photon.codes et dans app.photon.codes → Users", humanizeGRPCError(grpcStatus, grpcMsg), autoRegisteredLine)
+			}
+			return false, fmt.Errorf("photon spectrum (gRPC 7) : %s — vérifiez votre identifiant iMessage sur debug.photon.codes et dans app.photon.codes → Users", humanizeGRPCError(grpcStatus, grpcMsg))
 		}
 		if grpcStatus == "16" && !refreshedAuth {
 			refreshedAuth = true
