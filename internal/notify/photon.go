@@ -332,6 +332,9 @@ func (p *PhotonNotifier) getSpectrumIMessageToken(ctx context.Context, forceRefr
 func (p *PhotonNotifier) resolveSpectrumChatGUID(ctx context.Context, lineType, host, token string) (string, error) {
 	rec := strings.TrimSpace(p.recipient)
 	if strings.Contains(rec, ";") {
+		if lineType == "shared" {
+			return normalizeDMChatGUID(rec), nil
+		}
 		return rec, nil
 	}
 	if lineType == "dedicated" {
@@ -353,10 +356,17 @@ func (p *PhotonNotifier) resolveSpectrumChatGUID(ctx context.Context, lineType, 
 
 func normalizeDMChatGUID(recipient string) string {
 	r := strings.TrimSpace(recipient)
-	if strings.Contains(r, ";") {
+	lower := strings.ToLower(r)
+	switch {
+	case strings.HasPrefix(lower, "imessage;-;"):
+		return "any;-;" + r[len("iMessage;-;"):]
+	case strings.HasPrefix(lower, "sms;-;"):
+		return "any;-;" + r[len("SMS;-;"):]
+	case strings.Contains(r, ";"):
 		return r
+	default:
+		return "any;-;" + r
 	}
-	return "iMessage;-;" + r
 }
 
 func (p *PhotonNotifier) postSpectrumGRPC(ctx context.Context, host, token, idemKey string, reqProto []byte) error {
@@ -450,6 +460,11 @@ func humanizeGRPCError(code, msg string) string {
 		return fallbackText(clean, "adresse introuvable sur iMessage")
 	case "7":
 		return fallbackText(clean, "autorisation refusée pour ce destinataire")
+	case "9":
+		if strings.Contains(strings.ToLower(clean), "no instance routed") {
+			return clean + " (vérifiez aussi qu'un premier message iMessage a bien été envoyé vers votre ligne partagée Photon)"
+		}
+		return fallbackText(clean, "précondition non remplie pour cette ligne iMessage")
 	case "14":
 		return fallbackText(clean, "serveur iMessage Photon temporairement indisponible")
 	case "16":

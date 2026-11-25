@@ -396,8 +396,8 @@ func TestPhotonSpectrumSharedGRPCSend(t *testing.T) {
 	if gotGRPCAuth != "Bearer light_auth_tok_shared" {
 		t.Fatalf("gRPC auth = %q", gotGRPCAuth)
 	}
-	if gotChatGUID != "iMessage;-;+33600000001" {
-		t.Fatalf("chat_guid = %q, want iMessage;-;+33600000001", gotChatGUID)
+	if gotChatGUID != "any;-;+33600000001" {
+		t.Fatalf("chat_guid = %q, want any;-;+33600000001", gotChatGUID)
 	}
 	if !strings.Contains(gotText, "Test notification") || gotIdem != "mw:resolved:ui-test:123" || gotClientMsgID != gotIdem {
 		t.Fatalf("unexpected gRPC payload text=%q idem=%q clientMsgID=%q", gotText, gotIdem, gotClientMsgID)
@@ -514,5 +514,24 @@ func TestPhotonSpectrumGRPCErrorTrailer(t *testing.T) {
 	err := p.Send(context.Background(), Alert{IncidentID: "err-1", State: StateDown, Summary: "Test"})
 	if err == nil || !strings.Contains(err.Error(), "gRPC 7") || !strings.Contains(err.Error(), "shared line") {
 		t.Fatalf("expected decoded gRPC 7 error, got %v", err)
+	}
+}
+
+func TestNormalizeDMChatGUID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"+33600000001", "any;-;+33600000001"},
+		{"user@icloud.com", "any;-;user@icloud.com"},
+		{"iMessage;-;+33600000001", "any;-;+33600000001"},
+		{"SMS;-;+33600000001", "any;-;+33600000001"},
+		{"any;-;+33600000001", "any;-;+33600000001"},
+		{"any;+;chat123", "any;+;chat123"},
+	}
+	for _, tc := range cases {
+		if got := normalizeDMChatGUID(tc.in); got != tc.want {
+			t.Fatalf("normalizeDMChatGUID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
