@@ -1,0 +1,8 @@
+# Local secrets and runtime state (never commit private_key_hex or group_psk_hex)
+config.yaml
+data/
+
+# Build artifacts
+/meshwatch
+*.test
+*.out

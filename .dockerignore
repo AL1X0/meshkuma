@@ -1,0 +1,9 @@
+.git
+.gitignore
+data
+config.yaml
+README.md
+SPEC.md
+assets
+*.test
+*.out

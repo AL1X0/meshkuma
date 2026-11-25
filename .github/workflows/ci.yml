@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Go Vet & Race Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with Race Detector
+        run: go test -race -count=1 -v ./...
+
+  docker:
+    name: Docker Image Build (< 25 MB)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t meshwatch:ci .
+
+      - name: Verify image size and keygen smoke test
+        run: |
+          SIZE_BYTES=$(docker image inspect meshwatch:ci --format '{{.Size}}')
+          SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
+          echo "Image size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          test "$SIZE_BYTES" -lt 26214400
+          docker run --rm meshwatch:ci keygen

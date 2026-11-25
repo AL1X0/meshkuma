@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
+  <defs>
+    <linearGradient id="heroBg" x1="0" y1="0" x2="1200" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#090d1a"/>
+      <stop offset="50%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <radialGradient id="glowLeft" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(200 160) scale(260 180)">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowRight" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1020 140) scale(300 200)">
+      <stop offset="0%" stop-color="#a855f7" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accentGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="pulseGrad" x1="80" y1="160" x2="270" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="320" rx="20" fill="url(#heroBg)"/>
+  <rect width="1200" height="320" rx="20" fill="url(#glowLeft)"/>
+  <rect width="1200" height="320" rx="20" fill="url(#glowRight)"/>
+  <rect x="1.5" y="1.5" width="1197" height="317" rx="18.5" stroke="#818cf8" stroke-opacity="0.25" stroke-width="1.5"/>
+
+  <!-- Subtle background grid -->
+  <g stroke="#94a3b8" stroke-opacity="0.06" stroke-width="1">
+    <path d="M0 80H1200M0 160H1200M0 240H1200"/>
+    <path d="M150 0V320M300 0V320M450 0V320M600 0V320M750 0V320M900 0V320M1050 0V320"/>
+  </g>
+
+  <!-- Left emblem -->
+  <g transform="translate(88, 68)">
+    <rect width="184" height="184" rx="38" fill="#0f172a" stroke="url(#accentGrad)" stroke-opacity="0.55" stroke-width="2.5"/>
+    <path d="M92 32L144 62V122L92 152L40 122V62Z" stroke="url(#accentGrad)" stroke-width="3.5" stroke-opacity="0.7" stroke-linejoin="round"/>
+    <path d="M92 32V152M40 62L144 122M144 62L40 122" stroke="url(#accentGrad)" stroke-width="2" stroke-opacity="0.28"/>
+    <path d="M26 94H58L70 64L86 122L102 76L114 94H158" stroke="url(#pulseGrad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="92" cy="32" r="7.5" fill="#38bdf8"/>
+    <circle cx="144" cy="62" r="7.5" fill="#818cf8"/>
+    <circle cx="144" cy="122" r="7.5" fill="#c084fc"/>
+    <circle cx="92" cy="152" r="7.5" fill="#34d399"/>
+    <circle cx="40" cy="122" r="7.5" fill="#818cf8"/>
+    <circle cx="40" cy="62" r="7.5" fill="#38bdf8"/>
+  </g>
+
+  <!-- Title & subtitle -->
+  <text x="320" y="132" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="64" font-weight="800" letter-spacing="-1.5">MeshWatch</text>
+  <text x="322" y="176" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="22" font-weight="400">Supervision Mesh P2P décentralisée sur Nostr &amp; Uptime Kuma</text>
+
+  <!-- Feature pills -->
+  <g transform="translate(322, 206)" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13.5" font-weight="600">
+    <rect x="0" y="0" width="188" height="36" rx="18" fill="#0f172a" stroke="#34d399" stroke-opacity="0.55"/>
+    <circle cx="20" cy="18" r="4.5" fill="#34d399"/>
+    <text x="34" y="23" fill="#a7f3d0">Zéro port entrant</text>
+
+    <rect x="202" y="0" width="176" height="36" rx="18" fill="#0f172a" stroke="#38bdf8" stroke-opacity="0.55"/>
+    <circle cx="222" cy="18" r="4.5" fill="#38bdf8"/>
+    <text x="236" y="23" fill="#bae6fd">AES-256-GCM E2E</text>
+
+    <rect x="392" y="0" width="200" height="36" rx="18" fill="#0f172a" stroke="#a855f7" stroke-opacity="0.55"/>
+    <circle cx="412" cy="18" r="4.5" fill="#c084fc"/>
+    <text x="426" y="23" fill="#e9d5ff">Distroless 10.5 MB</text>
+
+    <rect x="606" y="0" width="192" height="36" rx="18" fill="#0f172a" stroke="#f59e0b" stroke-opacity="0.55"/>
+    <circle cx="626" cy="18" r="4.5" fill="#fbbf24"/>
+    <text x="640" y="23" fill="#fde68a">Quorum Anti-Storm</text>
+  </g>
+</svg>

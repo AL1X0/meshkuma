@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="mesh" x1="20" y1="20" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="55%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="24" y1="64" x2="104" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <rect x="3" y="3" width="122" height="122" rx="25" stroke="url(#mesh)" stroke-opacity="0.35" stroke-width="2"/>
+  <!-- P2P Mesh links -->
+  <path d="M64 24L98 44L98 84L64 104L30 84L30 44Z" stroke="url(#mesh)" stroke-width="3" stroke-opacity="0.65" stroke-linejoin="round"/>
+  <path d="M64 24L64 104M30 44L98 84M98 44L30 84" stroke="url(#mesh)" stroke-width="2" stroke-opacity="0.28"/>
+  <!-- Heartbeat ECG pulse -->
+  <path d="M22 66H43L51 46L61 84L71 54L78 66H106" stroke="url(#pulse)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Peer nodes -->
+  <circle cx="64" cy="24" r="6" fill="#38bdf8"/>
+  <circle cx="98" cy="44" r="6" fill="#818cf8"/>
+  <circle cx="98" cy="84" r="6" fill="#c084fc"/>
+  <circle cx="64" cy="104" r="6" fill="#34d399"/>
+  <circle cx="30" cy="84" r="6" fill="#818cf8"/>
+  <circle cx="30" cy="44" r="6" fill="#38bdf8"/>
+</svg>

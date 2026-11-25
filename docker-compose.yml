@@ -1,0 +1,34 @@
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:2
+    container_name: meshwatch-kuma
+    restart: unless-stopped
+    volumes:
+      - ./data/kuma:/app/data
+    networks:
+      - meshwatch-net
+    # Exposer uniquement sur localhost ou via ton reverse proxy existant si besoin
+    # ports:
+    #   - "127.0.0.1:3001:3001"
+
+  meshwatch:
+    build: .
+    container_name: meshwatch-agent
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config.yaml:/etc/meshwatch/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - meshwatch-net
+    # Si la sonde Docker lit /var/run/docker.sock en mode nonroot, ajoute le GID du groupe docker
+    # de l'hôte (stat -c '%g' /var/run/docker.sock) ou utilise un docker-socket-proxy en lecture seule :
+    # group_add:
+    #   - "999"
+    command: ["run", "--config", "/etc/meshwatch/config.yaml"]
+
+networks:
+  meshwatch-net:
+    driver: bridge
