@@ -743,3 +743,328 @@ func TestProxmoxProbe(t *testing.T) {
 		t.Fatalf("expected unprivileged token guidance, got %+v", res)
 	}
 }
+
+func TestWindowsWinRMProbeWithAndWithoutHyperV(t *testing.T) {
+	baseQuery := func(_ context.Context, ns, wql string) ([]map[string]string, error) {
+		switch {
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_OperatingSystem"):
+			return []map[string]string{{
+				"csname":                 "SRV-WIN-LAB",
+				"caption":                "Microsoft Windows Server 2022 Standard",
+				"totalvisiblememorysize": "16777216",
+				"freephysicalmemory":     "8388608",
+			}}, nil
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_Processor"):
+			return []map[string]string{
+				{"loadpercentage": "20"},
+				{"loadpercentage": "30"},
+			}, nil
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_LogicalDisk"):
+			return []map[string]string{
+				{"deviceid": "C:", "size": "100000000000", "freespace": "60000000000"},
+				{"deviceid": "D:", "size": "500000000000", "freespace": "250000000000"},
+			}, nil
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_Service"):
+			return []map[string]string{
+				{"name": "W32Time", "state": "Running"},
+				{"name": "vmms", "state": "Running"},
+			}, nil
+		case ns == "root/virtualization/v2" && strings.Contains(wql, "Msvm_ComputerSystem"):
+			return []map[string]string{
+				{"name": "SRV-WIN-LAB", "elementname": "SRV-WIN-LAB", "caption": "Système ordinateur", "enabledstate": "2", "healthstate": "5"},
+				{"name": "11111111-2222-3333-4444-555555555555", "elementname": "VM-AD", "caption": "Ordinateur virtuel", "enabledstate": "2", "healthstate": "5"},
+				{"name": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "elementname": "VM-TEST", "caption": "Ordinateur virtuel", "enabledstate": "3", "healthstate": "5"},
+			}, nil
+		}
+		return nil, nil
+	}
+
+	// 1. Healthy Windows + Hyper-V (critical VM running; another stopped VM does not fail unless in VMs)
+	p := NewWindowsWinRMProbe(config.ProbeConfig{
+		ID:             "win-hv",
+		Kind:           "windows_winrm",
+		Host:           "192.168.1.40",
+		Port:           5985,
+		User:           `CORP\Administrator`,
+		Password:       "pw",
+		MaxCPUPercent:  90,
+		MaxRAMPercent:  90,
+		MaxDiskPercent: 90,
+		Services:       []string{"w32time", "vmms"},
+		VMs:            []string{"vm-ad"},
+	})
+	p.queryFn = baseQuery
+	res := p.Check(context.Background())
+	if !res.OK {
+		t.Fatalf("expected Windows+Hyper-V OK, got %+v", res)
+	}
+	for _, want := range []string{"SRV-WIN-LAB", "CPU 25%", "RAM 50%", "Disque D: 50%", "1/2 VM Hyper-V actives", "2/2 services OK"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("summary %q missing %q", res.Summary, want)
+		}
+	}
+
+	// 2. Plain Windows without Hyper-V (French or English InvalidNamespace ignored when no VMs required)
+	plainQuery := func(ctx context.Context, ns, wql string) ([]map[string]string, error) {
+		if ns == "root/virtualization/v2" {
+			return nil, errWMIInvalidNamespace
+		}
+		return baseQuery(ctx, ns, wql)
+	}
+	pPlain := NewWindowsWinRMProbe(config.ProbeConfig{
+		ID:             "win-plain",
+		Host:           "192.168.1.41",
+		User:           "Administrator",
+		Password:       "pw",
+		MaxCPUPercent:  90,
+		MaxRAMPercent:  90,
+		MaxDiskPercent: 90,
+	})
+	pPlain.queryFn = plainQuery
+	res = pPlain.Check(context.Background())
+	if !res.OK || strings.Contains(res.Summary, "Hyper-V") {
+		t.Fatalf("expected plain Windows OK without Hyper-V mention, got %+v", res)
+	}
+
+	// 3. Plain Windows when critical Hyper-V VMs WERE requested -> explicit failure
+	pMissingHV := NewWindowsWinRMProbe(config.ProbeConfig{
+		ID:       "win-no-hv",
+		Host:     "192.168.1.41",
+		User:     "Administrator",
+		Password: "pw",
+		VMs:      []string{"VM-AD"},
+	})
+	pMissingHV.queryFn = plainQuery
+	res = pMissingHV.Check(context.Background())
+	if res.OK || !strings.Contains(res.Summary, "Hyper-V non installé") {
+		t.Fatalf("expected missing Hyper-V role error, got %+v", res)
+	}
+
+	// 4. Threshold breaches, stopped service, stopped/missing Hyper-V VM
+	pFail := NewWindowsWinRMProbe(config.ProbeConfig{
+		ID:             "win-fail",
+		Host:           "192.168.1.40",
+		User:           "Administrator",
+		Password:       "pw",
+		MaxCPUPercent:  20,
+		MaxRAMPercent:  40,
+		MaxDiskPercent: 45,
+		Disks:          []string{"C"},
+		Services:       []string{"W32Time", "Spooler"},
+		VMs:            []string{"VM-TEST", "VM-MISSING"},
+	})
+	pFail.queryFn = baseQuery
+	res = pFail.Check(context.Background())
+	if res.OK {
+		t.Fatalf("expected Windows failure result, got OK: %+v", res)
+	}
+	for _, want := range []string{
+		"CPU 25.0% > 20%",
+		"RAM 50.0% > 40%",
+		"Service Spooler introuvable",
+		"VM Hyper-V VM-TEST (arrêtée)",
+		"VM Hyper-V VM-MISSING introuvable",
+	} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("failure summary %q missing %q", res.Summary, want)
+		}
+	}
+}
+
+func TestWSManXMLParsingAndCredentials(t *testing.T) {
+	dom, usr := splitWindowsCredentials(`CONTOSO\admin`, "")
+	if dom != "CONTOSO" || usr != "admin" {
+		t.Fatalf("splitWindowsCredentials backslash = (%q, %q)", dom, usr)
+	}
+	dom, usr = splitWindowsCredentials("admin@contoso.local", "")
+	if dom != "" || usr != "admin@contoso.local" {
+		t.Fatalf("splitWindowsCredentials UPN = (%q, %q)", dom, usr)
+	}
+
+	sampleXML := `<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:n1="http://schemas.xmlsoap.org/ws/2004/09/enumeration" xmlns:p="http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/Win32_LogicalDisk">
+  <s:Body>
+    <n1:EnumerateResponse>
+      <w:Items>
+        <p:Win32_LogicalDisk>
+          <p:DeviceID>C:</p:DeviceID>
+          <p:FreeSpace>53687091200</p:FreeSpace>
+          <p:Size>107374182400</p:Size>
+        </p:Win32_LogicalDisk>
+      </w:Items>
+      <w:EndOfSequence/>
+    </n1:EnumerateResponse>
+  </s:Body>
+</s:Envelope>`
+	parsed, err := parseWSManResponse([]byte(sampleXML))
+	if err != nil {
+		t.Fatalf("parseWSManResponse: %v", err)
+	}
+	if !parsed.endOfSequence || len(parsed.rows) != 1 || parsed.rows[0]["deviceid"] != "C:" || parsed.rows[0]["size"] != "107374182400" {
+		t.Fatalf("unexpected parsed WS-Man response: %+v", parsed)
+	}
+
+	faultXML := `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><s:Fault><s:Reason><s:Text xml:lang="fr-FR">Espace de noms non valide</s:Text></s:Reason><s:Detail><f:WSManFault Code="2150858770"><f:Message>L'espace de noms n'est pas valide.</f:Message></f:WSManFault></s:Detail></s:Fault></s:Body></s:Envelope>`
+	fParsed, err := parseWSManResponse([]byte(faultXML))
+	if err != nil {
+		t.Fatalf("parseWSManResponse fault: %v", err)
+	}
+	if !isInvalidNamespaceFault(fParsed.fault, fParsed.faultCode, "root/virtualization/v2") {
+		t.Fatalf("expected InvalidNamespace detection for French fault: %+v", fParsed)
+	}
+}
+
+func TestWindowsWinRMProbeMockHTTPServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "":
+			w.Header().Add("WWW-Authenticate", "Basic realm=\"WinRM\"")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		case "Basic QWxpY2U6YmFk": // Alice:bad
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/soap+xml;charset=UTF-8")
+		var bodyBuf [16384]byte
+		n, _ := r.Body.Read(bodyBuf[:])
+		reqXML := string(bodyBuf[:n])
+		switch {
+		case strings.Contains(reqXML, "Win32_OperatingSystem"):
+			_, _ = w.Write([]byte(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><s:Body><EnumerateResponse><w:Items><Win32_OperatingSystem><CSName>MOCK-WIN</CSName><TotalVisibleMemorySize>1000</TotalVisibleMemorySize><FreePhysicalMemory>400</FreePhysicalMemory></Win32_OperatingSystem></w:Items><w:EndOfSequence/></EnumerateResponse></s:Body></s:Envelope>`))
+		case strings.Contains(reqXML, "Win32_Processor"):
+			_, _ = w.Write([]byte(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><s:Body><EnumerateResponse><w:Items><Win32_Processor><LoadPercentage>15</LoadPercentage></Win32_Processor></w:Items><w:EndOfSequence/></EnumerateResponse></s:Body></s:Envelope>`))
+		case strings.Contains(reqXML, "Win32_LogicalDisk"):
+			_, _ = w.Write([]byte(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><s:Body><EnumerateResponse><w:Items><Win32_LogicalDisk><DeviceID>C:</DeviceID><Size>1000</Size><FreeSpace>700</FreeSpace></Win32_LogicalDisk></w:Items><w:EndOfSequence/></EnumerateResponse></s:Body></s:Envelope>`))
+		case strings.Contains(reqXML, "Msvm_ComputerSystem"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><s:Fault><s:Detail><WSManFault Code="2147749902"><Message>InvalidNamespace</Message></WSManFault></s:Detail></s:Fault></s:Body></s:Envelope>`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	var port int
+	for _, ch := range portStr {
+		port = port*10 + int(ch-'0')
+	}
+
+	built, err := BuildFromConfig([]config.ProbeConfig{
+		{
+			ID:             "win-mock",
+			Kind:           "windows_winrm",
+			Host:           "127.0.0.1",
+			Port:           port,
+			User:           "Administrator",
+			Password:       "okpass",
+			MaxCPUPercent:  90,
+			MaxRAMPercent:  90,
+			MaxDiskPercent: 90,
+		},
+		{
+			ID:       "win-bad-auth",
+			Kind:     "windows_winrm",
+			Host:     "127.0.0.1",
+			Port:     port,
+			User:     "Alice",
+			Password: "bad",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildFromConfig: %v", err)
+	}
+	res := built[0].Probe.Check(context.Background())
+	if !res.OK || !strings.Contains(res.Summary, "MOCK-WIN") || !strings.Contains(res.Summary, "CPU 15%") || !strings.Contains(res.Summary, "RAM 60%") {
+		t.Fatalf("unexpected WinRM HTTP mock result: %+v", res)
+	}
+	resAuth := built[1].Probe.Check(context.Background())
+	if resAuth.OK || !strings.Contains(resAuth.Summary, "HTTP 401") {
+		t.Fatalf("expected 401 failure, got %+v", resAuth)
+	}
+}
+
+func TestLinuxSSHProbe(t *testing.T) {
+	healthyOutput := strings.Join([]string{
+		"HOST=srv-linux-01",
+		"STAT1=cpu  1000 0 500 8500 0 0 0 0 0 0",
+		"STAT2=cpu  1200 0 600 9200 0 0 0 0 0 0",
+		"MEM_MemTotal=1000000",
+		"MEM_MemAvailable=400000",
+		"DISK=tmpfs tmpfs 102400 1024 101376 1% /run",
+		"DISK=overlay overlay 10485760 4000000 6485760 39% /var/lib/docker/overlay2/abc/merged",
+		"DISK=/dev/sda1 ext4 104857600 40000000 60000000 40% /",
+		"DISK=/dev/sdb1 ext4 209715200 100000000 100000000 50% /data",
+		"SVC=docker\tactive",
+		"SVC=ssh\tactive",
+	}, "\n")
+
+	built, err := BuildFromConfig([]config.ProbeConfig{{
+		ID:             "lin-ok",
+		Kind:           "linux_ssh",
+		Host:           "192.168.1.45",
+		Port:           22,
+		User:           "monitor",
+		Password:       "secret",
+		MaxCPUPercent:  90,
+		MaxRAMPercent:  90,
+		MaxDiskPercent: 90,
+		Services:       []string{"docker", "ssh"},
+	}})
+	if err != nil {
+		t.Fatalf("BuildFromConfig(linux_ssh): %v", err)
+	}
+	p := built[0].Probe.(*LinuxSSHProbe)
+	p.runFn = func(_ context.Context, _ string) (string, error) {
+		return healthyOutput, nil
+	}
+
+	res := p.Check(context.Background())
+	if !res.OK {
+		t.Fatalf("expected healthy linux_ssh result, got %+v", res)
+	}
+	for _, want := range []string{"srv-linux-01", "CPU 30%", "RAM 60%", "Disque /data 50%", "2/2 services OK"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("summary %q missing %q", res.Summary, want)
+		}
+	}
+
+	// Thresholds + missing disk + inactive service
+	pFail := NewLinuxSSHProbe(config.ProbeConfig{
+		ID:             "lin-fail",
+		Host:           "192.168.1.45",
+		User:           "monitor",
+		Password:       "secret",
+		MaxCPUPercent:  25,
+		MaxRAMPercent:  50,
+		MaxDiskPercent: 35,
+		Disks:          []string{"/", "/mnt/missing"},
+		Services:       []string{"docker", "nginx"},
+	})
+	pFail.runFn = func(_ context.Context, _ string) (string, error) {
+		return healthyOutput + "\nSVC=nginx\tinactive\n", nil
+	}
+	resFail := pFail.Check(context.Background())
+	if resFail.OK {
+		t.Fatalf("expected failure result, got OK: %+v", resFail)
+	}
+	for _, want := range []string{"CPU 30.0% > 25%", "RAM 60.0% > 50%", "Disque / 40.0% > 35%", "Disque /mnt/missing introuvable", "Service nginx (inactive)"} {
+		if !strings.Contains(resFail.Summary, want) {
+			t.Errorf("failure summary %q missing %q", resFail.Summary, want)
+		}
+	}
+
+	// Auth failure
+	pErr := NewLinuxSSHProbe(config.ProbeConfig{ID: "lin-err", Host: "192.168.1.45", User: "monitor", Password: "bad"})
+	pErr.runFn = func(_ context.Context, _ string) (string, error) {
+		return "", errors.New("ssh: unable to authenticate, attempted methods [none password]")
+	}
+	resErr := pErr.Check(context.Background())
+	if resErr.OK || !strings.Contains(resErr.Summary, "authentification refusée") {
+		t.Fatalf("expected French SSH auth error, got %+v", resErr)
+	}
+}

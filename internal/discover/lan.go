@@ -35,6 +35,7 @@ type SuggestedProbe struct {
 	MaxCPUPercent      float64  `json:"max_cpu_percent,omitempty"`
 	MaxDiskPercent     float64  `json:"max_disk_percent,omitempty"`
 	MaxRAMPercent      float64  `json:"max_ram_percent,omitempty"`
+	UseHTTPS           bool     `json:"use_https,omitempty"`
 	Services           []string `json:"services,omitempty"`
 }
 
@@ -82,6 +83,8 @@ var defaultPortProfiles = []portProfile{
 	{port: 5001, https: true, hintName: "NAS Synology", category: "synology"},
 	{port: 9100, https: false, hintName: "Serveur Linux", category: "linux", isExporter: "node_exporter"},
 	{port: 9182, https: false, hintName: "Serveur Windows", category: "windows", isExporter: "windows_exporter"},
+	{port: 5985, https: false, skipTitle: true, hintName: "Windows / Hyper-V (WinRM)", category: "windows"},
+	{port: 5986, https: true, skipTitle: true, hintName: "Windows / Hyper-V (WinRM HTTPS)", category: "windows"},
 	{port: 8096, https: false, hintName: "Jellyfin", category: "web"},
 	{port: 2283, https: false, hintName: "Immich", category: "web"},
 	{port: 8123, https: false, hintName: "Home Assistant", category: "web"},
@@ -458,6 +461,7 @@ func classifyHost(ctx context.Context, client *http.Client, ip string, openPorts
 	}
 
 	// 3. Windows windows_exporter (port 9182)
+	hasWinExporter := false
 	if portSet[9182] {
 		metricsURL := fmt.Sprintf("http://%s:9182/metrics", ip)
 		if snippet := fetchBodySnippet(ctx, client, metricsURL, 2048); strings.Contains(snippet, "windows_") {
@@ -485,12 +489,52 @@ func classifyHost(ctx context.Context, client *http.Client, ip string, openPorts
 					MaxRAMPercent:  92,
 				},
 			})
+			hasWinExporter = true
 			hasSpecific = true
 		}
 	}
 
+	// 3b. Agentless Windows / Hyper-V via WinRM (ports 5985 / 5986)
+	if !hasWinExporter && (portSet[5985] || portSet[5986]) {
+		winPort := 5985
+		useHTTPS := false
+		if !portSet[5985] && portSet[5986] {
+			winPort = 5986
+			useHTTPS = true
+		}
+		name := "Serveur Windows / Hyper-V"
+		if hostname != "" {
+			name = hostname + " (Windows)"
+		}
+		out = append(out, DiscoveredItem{
+			Key:           fmt.Sprintf("windows_winrm:%s", ip),
+			IP:            ip,
+			Hostname:      hostname,
+			Name:          name,
+			Category:      "windows",
+			CategoryLabel: "Windows / Hyper-V",
+			Summary:       fmt.Sprintf("WinRM détecté sur %s:%d. Surveillance sans agent (CPU, RAM, disques, services et VM Hyper-V).", ip, winPort),
+			Port:          winPort,
+			OpenPorts:     openPorts,
+			SuggestedProbe: SuggestedProbe{
+				ID:                 makeProbeID("win", hostname, ip),
+				Kind:               "windows_winrm",
+				Interval:           "60s",
+				Timeout:            "15s",
+				Host:               ip,
+				Port:               winPort,
+				UseHTTPS:           useHTTPS,
+				InsecureSkipVerify: true,
+				MaxCPUPercent:      90,
+				MaxRAMPercent:      90,
+				MaxDiskPercent:     90,
+			},
+		})
+		hasSpecific = true
+	}
+
 	// 4. Web applications / dashboards on open HTTP/HTTPS ports
-	skipWeb := map[int]bool{5000: true, 5001: true, 8006: true, 9100: true, 9182: true, 22: true, 3389: true}
+	skipWeb := map[int]bool{5000: true, 5001: true, 8006: true, 9100: true, 9182: true, 5985: true, 5986: true, 22: true, 3389: true}
 	for _, port := range openPorts {
 		if skipWeb[port] {
 			continue
@@ -563,27 +607,30 @@ func classifyHost(ctx context.Context, client *http.Client, ip string, openPorts
 				},
 			})
 		} else if portSet[22] {
-			name := "Serveur Linux / SSH"
+			name := "Serveur Linux (SSH)"
 			if hostname != "" {
-				name = hostname
+				name = hostname + " (SSH)"
 			}
 			out = append(out, DiscoveredItem{
-				Key:           fmt.Sprintf("tcp:%s:22", ip),
+				Key:           fmt.Sprintf("linux_ssh:%s", ip),
 				IP:            ip,
 				Hostname:      hostname,
 				Name:          name,
 				Category:      "linux",
-				CategoryLabel: "Serveur SSH",
-				Summary:       fmt.Sprintf("Port SSH 22 ouvert sur %s", ip),
+				CategoryLabel: "Serveur Linux (SSH)",
+				Summary:       fmt.Sprintf("SSH détecté sur %s:22. Surveillance Linux sans agent (CPU, RAM, disques, services).", ip),
 				Port:          22,
 				OpenPorts:     openPorts,
 				SuggestedProbe: SuggestedProbe{
-					ID:       makeProbeID("ssh", hostname, ip),
-					Kind:     "tcp",
-					Interval: "60s",
-					Timeout:  "5s",
-					Host:     ip,
-					Port:     22,
+					ID:             makeProbeID("linux", hostname, ip),
+					Kind:           "linux_ssh",
+					Interval:       "60s",
+					Timeout:        "15s",
+					Host:           ip,
+					Port:           22,
+					MaxCPUPercent:  90,
+					MaxRAMPercent:  90,
+					MaxDiskPercent: 90,
 				},
 			})
 		}

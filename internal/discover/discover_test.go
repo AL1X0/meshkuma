@@ -134,3 +134,22 @@ func TestClassifyHostProxmox(t *testing.T) {
 		t.Fatalf("unexpected Proxmox suggested probe: %+v", item.SuggestedProbe)
 	}
 }
+
+func TestClassifyHostWindowsWinRMAndLinuxSSH(t *testing.T) {
+	client := &http.Client{Timeout: 80 * time.Millisecond}
+
+	winItems := classifyHost(context.Background(), client, "192.168.1.40", []int{5985, 3389}, map[int]portProfile{
+		5985: {port: 5985, skipTitle: true, hintName: "Windows / Hyper-V (WinRM)", category: "windows"},
+		3389: {port: 3389, skipTitle: true, hintName: "PC / Serveur Windows", category: "windows"},
+	})
+	if len(winItems) != 1 || winItems[0].SuggestedProbe.Kind != "windows_winrm" || winItems[0].SuggestedProbe.Port != 5985 {
+		t.Fatalf("unexpected WinRM discovery items: %+v", winItems)
+	}
+
+	linItems := classifyHost(context.Background(), client, "192.168.1.45", []int{22}, map[int]portProfile{
+		22: {port: 22, skipTitle: true, hintName: "Serveur Linux (SSH)", category: "linux"},
+	})
+	if len(linItems) != 1 || linItems[0].SuggestedProbe.Kind != "linux_ssh" || linItems[0].SuggestedProbe.Port != 22 {
+		t.Fatalf("unexpected Linux SSH discovery items: %+v", linItems)
+	}
+}

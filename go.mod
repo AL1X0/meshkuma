@@ -3,6 +3,7 @@ module meshwatch
 go 1.23.1
 
 require (
+	github.com/bodgit/ntlmssp v0.0.0-20240506230425-31973bb52d9b
 	github.com/coder/websocket v1.8.12
 	github.com/gosnmp/gosnmp v1.41.0
 	github.com/nbd-wtf/go-nostr v0.51.3
@@ -12,6 +13,7 @@ require (
 
 require (
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
+	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/bytedance/sonic v1.13.1 // indirect
@@ -33,4 +35,5 @@ require (
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 )

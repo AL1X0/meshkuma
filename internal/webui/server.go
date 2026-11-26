@@ -591,8 +591,10 @@ func (s *Server) handleTestProbe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timeout := built[0].Timeout
-	if timeout <= 0 || timeout > 10*time.Second {
-		timeout = 10 * time.Second
+	if timeout < 15*time.Second {
+		timeout = 15 * time.Second
+	} else if timeout > 25*time.Second {
+		timeout = 25 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
@@ -768,11 +770,9 @@ func (s *Server) handleDiscoverLAN(w http.ResponseWriter, r *http.Request) {
 			}
 			if p.Host != "" {
 				existingTargets[fmt.Sprintf("%s:%s:%d", p.Kind, strings.ToLower(p.Host), p.Port)] = true
-				if p.Kind == "synology" {
-					existingTargets["synology:"+strings.ToLower(p.Host)] = true
-				}
-				if p.Kind == "proxmox" {
-					existingTargets["proxmox:"+strings.ToLower(p.Host)] = true
+				switch p.Kind {
+				case "synology", "proxmox", "windows_winrm", "linux_ssh":
+					existingTargets[p.Kind+":"+strings.ToLower(p.Host)] = true
 				}
 			}
 		}
@@ -789,11 +789,15 @@ func (s *Server) handleDiscoverLAN(w http.ResponseWriter, r *http.Request) {
 		if sp.URL != "" && existingTargets[strings.TrimRight(strings.ToLower(sp.URL), "/")] {
 			dup = true
 		}
-		if sp.Kind == "synology" && existingTargets["synology:"+strings.ToLower(sp.Host)] {
-			dup = true
-		}
-		if sp.Kind == "proxmox" && (existingTargets["proxmox:"+strings.ToLower(item.IP)] || (item.Hostname != "" && existingTargets["proxmox:"+strings.ToLower(item.Hostname)])) {
-			dup = true
+		switch sp.Kind {
+		case "synology":
+			if existingTargets["synology:"+strings.ToLower(sp.Host)] {
+				dup = true
+			}
+		case "proxmox", "windows_winrm", "linux_ssh":
+			if existingTargets[sp.Kind+":"+strings.ToLower(item.IP)] || (item.Hostname != "" && existingTargets[sp.Kind+":"+strings.ToLower(item.Hostname)]) {
+				dup = true
+			}
 		}
 		if sp.Host != "" && existingTargets[fmt.Sprintf("%s:%s:%d", sp.Kind, strings.ToLower(sp.Host), sp.Port)] {
 			dup = true

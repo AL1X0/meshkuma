@@ -69,6 +69,31 @@ probes:
     max_ram_percent: 90
     max_disk_percent: 90
 
+  - id: "win-hyperv"
+    kind: "windows_winrm"
+    interval: 60s
+    host: "192.168.1.40"
+    port: 5985
+    user: "Administrator"
+    password: "REMPLACER_MOT_DE_PASSE_WINDOWS"
+    vms: ["SRV-APP"]
+    services: ["W32Time"]
+    max_cpu_percent: 90
+    max_ram_percent: 90
+    max_disk_percent: 90
+
+  - id: "linux-ssh"
+    kind: "linux_ssh"
+    interval: 60s
+    host: "192.168.1.45"
+    port: 22
+    user: "monitor"
+    password: "REMPLACER_MOT_DE_PASSE_SSH"
+    services: ["docker", "ssh"]
+    max_cpu_percent: 90
+    max_ram_percent: 90
+    max_disk_percent: 90
+
 notifications:
   ntfy:
     enabled: true

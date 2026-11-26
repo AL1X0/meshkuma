@@ -70,6 +70,14 @@
             <span class="kind-card-title">Serveur Proxmox VE</span>
             <span class="kind-card-desc">Nœuds, CPU, RAM, stockages et état des VM/LXC via API</span>
           </button>
+          <button type="button" class="kind-card" data-pick-kind="windows_winrm">
+            <span class="kind-card-title">Windows / Hyper-V (sans agent)</span>
+            <span class="kind-card-desc">CPU, RAM, disques, services et VM Hyper-V via identifiants Windows</span>
+          </button>
+          <button type="button" class="kind-card" data-pick-kind="linux_ssh">
+            <span class="kind-card-title">Serveur Linux SSH (sans agent)</span>
+            <span class="kind-card-desc">CPU, RAM, disques et services systemd via identifiants SSH</span>
+          </button>
           <button type="button" class="kind-card" data-pick-kind="docker">
             <span class="kind-card-title">Conteneurs Docker</span>
             <span class="kind-card-desc">Choisir dans la liste des applications Docker locales</span>
@@ -79,12 +87,12 @@
             <span class="kind-card-desc">Box, routeur, imprimante, caméra ou port réseau</span>
           </button>
           <button type="button" class="kind-card" data-pick-kind="node_exporter">
-            <span class="kind-card-title">Serveur Linux</span>
-            <span class="kind-card-desc">Espace disque, mémoire RAM et charge système</span>
+            <span class="kind-card-title">Linux (node_exporter)</span>
+            <span class="kind-card-desc">Métriques Prometheus classiques sur port 9100</span>
           </button>
           <button type="button" class="kind-card" data-pick-kind="windows_exporter">
-            <span class="kind-card-title">PC ou serveur Windows</span>
-            <span class="kind-card-desc">Disques, RAM et services Windows essentiels</span>
+            <span class="kind-card-title">Windows (windows_exporter)</span>
+            <span class="kind-card-desc">Métriques Prometheus classiques sur port 9182</span>
           </button>
           <button type="button" class="kind-card" data-pick-kind="snmp_oid">
             <span class="kind-card-title">Capteur SNMP personnalisé</span>

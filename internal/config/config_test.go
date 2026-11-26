@@ -102,6 +102,24 @@ probes:
     max_ram_percent: 90
     max_disk_percent: 90
     vms: ["100", "homeassistant"]
+  - id: "win-hyperv"
+    kind: "windows_winrm"
+    host: "192.168.1.40"
+    user: "Administrator"
+    password: "secret-winrm-password"
+    max_cpu_percent: 90
+    max_ram_percent: 90
+    max_disk_percent: 90
+    vms: ["SRV-APP"]
+  - id: "linux-ssh"
+    kind: "linux_ssh"
+    host: "192.168.1.45"
+    user: "monitor"
+    password: "secret-ssh-password"
+    max_cpu_percent: 90
+    max_ram_percent: 90
+    max_disk_percent: 90
+    services: ["ssh"]
 
 notifications:
   ntfy:
@@ -140,8 +158,8 @@ func TestParseValidConfig(t *testing.T) {
 	if _, ok := allowed[peerPub]; !ok {
 		t.Fatalf("peer %s missing from AllowedPeers()", peerPub)
 	}
-	if len(cfg.Probes) != 8 {
-		t.Fatalf("len(Probes) = %d, want 8", len(cfg.Probes))
+	if len(cfg.Probes) != 10 {
+		t.Fatalf("len(Probes) = %d, want 10", len(cfg.Probes))
 	}
 }
 
@@ -161,6 +179,22 @@ probes:
     url: "https://example.com"
   - id: "docker-default"
     kind: "docker"
+  - id: "winrm-http-default"
+    kind: "windows_winrm"
+    host: "192.168.1.40"
+    user: "Administrator"
+    password: "pw"
+  - id: "winrm-https-default"
+    kind: "windows_winrm"
+    host: "192.168.1.41"
+    use_https: true
+    user: "Administrator"
+    password: "pw"
+  - id: "ssh-default"
+    kind: "linux_ssh"
+    host: "192.168.1.45"
+    user: "monitor"
+    password: "pw"
 `, priv, psk)
 
 	cfg, err := Parse([]byte(yml))
@@ -181,6 +215,15 @@ probes:
 	}
 	if cfg.Probes[1].Socket != DefaultDockerSocket || cfg.Probes[1].Label != DefaultDockerLabel {
 		t.Errorf("Docker defaults not applied: %+v", cfg.Probes[1])
+	}
+	if cfg.Probes[2].Port != DefaultWinRMPort {
+		t.Errorf("WinRM HTTP default port = %d, want %d", cfg.Probes[2].Port, DefaultWinRMPort)
+	}
+	if cfg.Probes[3].Port != DefaultWinRMHTTPSPort {
+		t.Errorf("WinRM HTTPS default port = %d, want %d", cfg.Probes[3].Port, DefaultWinRMHTTPSPort)
+	}
+	if cfg.Probes[4].Port != DefaultSSHPort {
+		t.Errorf("SSH default port = %d, want %d", cfg.Probes[4].Port, DefaultSSHPort)
 	}
 }
 
@@ -326,6 +369,57 @@ probes:
 			wantSub: "token_secret is required",
 		},
 		{
+			name: "windows_winrm missing user",
+			yaml: fmt.Sprintf(`
+node:
+  name: "test"
+  private_key_hex: "%s"
+  group_psk_hex: "%s"
+nostr:
+  relays: ["wss://nos.lol"]
+probes:
+  - id: "win"
+    kind: "windows_winrm"
+    host: "192.168.1.40"
+    password: "pw"
+`, priv, psk),
+			wantSub: "user is required",
+		},
+		{
+			name: "windows_winrm missing password",
+			yaml: fmt.Sprintf(`
+node:
+  name: "test"
+  private_key_hex: "%s"
+  group_psk_hex: "%s"
+nostr:
+  relays: ["wss://nos.lol"]
+probes:
+  - id: "win"
+    kind: "windows_winrm"
+    host: "192.168.1.40"
+    user: "Administrator"
+`, priv, psk),
+			wantSub: "password is required",
+		},
+		{
+			name: "linux_ssh missing password and ssh_key",
+			yaml: fmt.Sprintf(`
+node:
+  name: "test"
+  private_key_hex: "%s"
+  group_psk_hex: "%s"
+nostr:
+  relays: ["wss://nos.lol"]
+probes:
+  - id: "lin"
+    kind: "linux_ssh"
+    host: "192.168.1.45"
+    user: "monitor"
+`, priv, psk),
+			wantSub: "password or ssh_key is required",
+		},
+		{
 			name: "invalid notifications",
 			yaml: fmt.Sprintf(`
 node:
@@ -378,7 +472,7 @@ func TestConfigExampleYAMLSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.example.yaml failed validation after replacing placeholders: %v", err)
 	}
-	if len(cfg.Probes) != 6 || len(cfg.Peers) != 1 {
+	if len(cfg.Probes) != 8 || len(cfg.Peers) != 1 {
 		t.Fatalf("unexpected counts in config.example.yaml: probes=%d peers=%d", len(cfg.Probes), len(cfg.Peers))
 	}
 }

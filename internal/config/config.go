@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +28,11 @@ const (
 	DefaultTLSMinDays        = 14
 	DefaultDockerSocket      = "/var/run/docker.sock"
 	DefaultDockerLabel       = "meshwatch.enable=true"
-	DefaultSNMPPort          = 161
-	DefaultSynologyMaxTempC  = 60
+	DefaultSNMPPort         = 161
+	DefaultSynologyMaxTempC = 60
+	DefaultWinRMPort        = 5985
+	DefaultWinRMHTTPSPort   = 5986
+	DefaultSSHPort          = 22
 )
 
 // Config holds the complete MeshWatch agent configuration.
@@ -130,6 +134,12 @@ type ProbeConfig struct {
 	Node          string   `yaml:"node"`
 	MaxCPUPercent float64  `yaml:"max_cpu_percent"`
 	VMs           []string `yaml:"vms"`
+
+	// Agentless Windows (WinRM) & Linux (SSH) probes
+	Password string `yaml:"password"`
+	SSHKey   string `yaml:"ssh_key"`
+	Domain   string `yaml:"domain"`
+	UseHTTPS bool   `yaml:"use_https"`
 }
 
 // NotificationsConfig configures outbound alert channels.
@@ -285,6 +295,51 @@ func (c *Config) applyDefaults() {
 					port = 8006
 				}
 				p.URL = fmt.Sprintf("https://%s", net.JoinHostPort(strings.TrimSpace(p.Host), fmt.Sprintf("%d", port)))
+			}
+		case "windows_winrm":
+			rawHost := strings.TrimSpace(p.Host)
+			lowerHost := strings.ToLower(rawHost)
+			if strings.HasPrefix(lowerHost, "http://") || strings.HasPrefix(lowerHost, "https://") {
+				if u, err := url.Parse(rawHost); err == nil {
+					if u.Scheme == "https" {
+						p.UseHTTPS = true
+					}
+					if h := u.Hostname(); h != "" {
+						p.Host = h
+					}
+					if p.Port == 0 && u.Port() != "" {
+						if parsedPort, err := strconv.Atoi(u.Port()); err == nil && parsedPort > 0 {
+							p.Port = parsedPort
+						}
+					}
+				}
+			} else if h, portStr, err := net.SplitHostPort(rawHost); err == nil && h != "" {
+				p.Host = h
+				if p.Port == 0 {
+					if parsedPort, err := strconv.Atoi(portStr); err == nil && parsedPort > 0 {
+						p.Port = parsedPort
+					}
+				}
+			}
+			if p.Port == 0 {
+				if p.UseHTTPS {
+					p.Port = DefaultWinRMHTTPSPort
+				} else {
+					p.Port = DefaultWinRMPort
+				}
+			}
+		case "linux_ssh":
+			rawHost := strings.TrimSpace(p.Host)
+			if h, portStr, err := net.SplitHostPort(rawHost); err == nil && h != "" {
+				p.Host = h
+				if p.Port == 0 {
+					if parsedPort, err := strconv.Atoi(portStr); err == nil && parsedPort > 0 {
+						p.Port = parsedPort
+					}
+				}
+			}
+			if p.Port == 0 {
+				p.Port = DefaultSSHPort
 			}
 		}
 	}
@@ -557,8 +612,52 @@ func validateProbe(idx int, p *ProbeConfig) []error {
 		if p.MaxDiskPercent < 0 || p.MaxDiskPercent > 100 {
 			errs = append(errs, fmt.Errorf("%s: max_disk_percent must be 0..100", prefix))
 		}
+	case "windows_winrm":
+		if strings.TrimSpace(p.Host) == "" {
+			errs = append(errs, fmt.Errorf("%s: host is required", prefix))
+		}
+		if p.Port <= 0 || p.Port > 65535 {
+			errs = append(errs, fmt.Errorf("%s: port (%d) must be 1..65535", prefix, p.Port))
+		}
+		if strings.TrimSpace(p.User) == "" {
+			errs = append(errs, fmt.Errorf("%s: user is required for windows_winrm probe", prefix))
+		}
+		if p.Password == "" {
+			errs = append(errs, fmt.Errorf("%s: password is required for windows_winrm probe", prefix))
+		}
+		if p.MaxCPUPercent < 0 || p.MaxCPUPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_cpu_percent must be 0..100", prefix))
+		}
+		if p.MaxRAMPercent < 0 || p.MaxRAMPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_ram_percent must be 0..100", prefix))
+		}
+		if p.MaxDiskPercent < 0 || p.MaxDiskPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_disk_percent must be 0..100", prefix))
+		}
+	case "linux_ssh":
+		if strings.TrimSpace(p.Host) == "" {
+			errs = append(errs, fmt.Errorf("%s: host is required", prefix))
+		}
+		if p.Port <= 0 || p.Port > 65535 {
+			errs = append(errs, fmt.Errorf("%s: port (%d) must be 1..65535", prefix, p.Port))
+		}
+		if strings.TrimSpace(p.User) == "" {
+			errs = append(errs, fmt.Errorf("%s: user is required for linux_ssh probe", prefix))
+		}
+		if p.Password == "" && strings.TrimSpace(p.SSHKey) == "" {
+			errs = append(errs, fmt.Errorf("%s: password or ssh_key is required for linux_ssh probe", prefix))
+		}
+		if p.MaxCPUPercent < 0 || p.MaxCPUPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_cpu_percent must be 0..100", prefix))
+		}
+		if p.MaxRAMPercent < 0 || p.MaxRAMPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_ram_percent must be 0..100", prefix))
+		}
+		if p.MaxDiskPercent < 0 || p.MaxDiskPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_disk_percent must be 0..100", prefix))
+		}
 	default:
-		errs = append(errs, fmt.Errorf("%s: unsupported kind %q (supported: http, tcp, docker, synology, snmp_oid, node_exporter, windows_exporter, proxmox)", prefix, p.Kind))
+		errs = append(errs, fmt.Errorf("%s: unsupported kind %q (supported: http, tcp, docker, synology, snmp_oid, node_exporter, windows_exporter, proxmox, windows_winrm, linux_ssh)", prefix, p.Kind))
 	}
 
 	return errs

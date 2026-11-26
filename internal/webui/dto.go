@@ -94,6 +94,11 @@ type ProbeDTO struct {
 	Node          string   `json:"node,omitempty" yaml:"node,omitempty"`
 	MaxCPUPercent float64  `json:"max_cpu_percent,omitempty" yaml:"max_cpu_percent,omitempty"`
 	VMs           []string `json:"vms,omitempty" yaml:"vms,omitempty"`
+
+	Password string `json:"password,omitempty" yaml:"password,omitempty"`
+	SSHKey   string `json:"ssh_key,omitempty" yaml:"ssh_key,omitempty"`
+	Domain   string `json:"domain,omitempty" yaml:"domain,omitempty"`
+	UseHTTPS bool   `json:"use_https,omitempty" yaml:"use_https,omitempty"`
 }
 
 type NotificationsDTO struct {
@@ -181,6 +186,10 @@ func configToDTO(cfg *config.Config) ConfigDTO {
 			Node:               p.Node,
 			MaxCPUPercent:      p.MaxCPUPercent,
 			VMs:                append([]string(nil), p.VMs...),
+			Password:           p.Password,
+			SSHKey:             p.SSHKey,
+			Domain:             p.Domain,
+			UseHTTPS:           p.UseHTTPS,
 		}
 		probesList = append(probesList, dto)
 	}
@@ -336,6 +345,31 @@ func cleanDTO(in ConfigDTO) ConfigDTO {
 			cp.MaxDiskPercent = p.MaxDiskPercent
 			cp.Disks = trimSlice(p.Disks)
 			cp.VMs = trimSlice(p.VMs)
+		case "windows_winrm":
+			cp.Host = strings.TrimSpace(p.Host)
+			cp.Port = p.Port
+			cp.UseHTTPS = p.UseHTTPS
+			cp.InsecureSkipVerify = p.InsecureSkipVerify
+			cp.Domain = strings.TrimSpace(p.Domain)
+			cp.User = strings.TrimSpace(p.User)
+			cp.Password = p.Password
+			cp.MaxCPUPercent = p.MaxCPUPercent
+			cp.MaxRAMPercent = p.MaxRAMPercent
+			cp.MaxDiskPercent = p.MaxDiskPercent
+			cp.Disks = trimSlice(p.Disks)
+			cp.Services = trimSlice(p.Services)
+			cp.VMs = trimSlice(p.VMs)
+		case "linux_ssh":
+			cp.Host = strings.TrimSpace(p.Host)
+			cp.Port = p.Port
+			cp.User = strings.TrimSpace(p.User)
+			cp.Password = p.Password
+			cp.SSHKey = p.SSHKey
+			cp.MaxCPUPercent = p.MaxCPUPercent
+			cp.MaxRAMPercent = p.MaxRAMPercent
+			cp.MaxDiskPercent = p.MaxDiskPercent
+			cp.Disks = trimSlice(p.Disks)
+			cp.Services = trimSlice(p.Services)
 		default:
 			cp = p
 		}

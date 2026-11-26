@@ -5,10 +5,12 @@
     { value: "http", label: "Site ou app web" },
     { value: "synology", label: "NAS Synology" },
     { value: "proxmox", label: "Serveur Proxmox VE" },
+    { value: "windows_winrm", label: "Windows / Hyper-V" },
+    { value: "linux_ssh", label: "Serveur Linux (SSH)" },
     { value: "docker", label: "Conteneurs Docker" },
     { value: "tcp", label: "Appareil du réseau" },
-    { value: "node_exporter", label: "Serveur Linux" },
-    { value: "windows_exporter", label: "PC Windows" },
+    { value: "node_exporter", label: "Linux (node_exporter)" },
+    { value: "windows_exporter", label: "Windows (windows_exporter)" },
     { value: "snmp_oid", label: "Capteur SNMP" }
   ];
 
@@ -174,6 +176,7 @@
 
   function humanizeError(raw) {
     const s = String(raw || "");
+    if (/^(WinRM|SSH|Proxmox)\b/.test(s)) return s;
     if (/connection refused/i.test(s)) return "L'appareil a refusé la connexion. Vérifiez que le service est démarré et le port correct.";
     if (/no route to host|network is unreachable/i.test(s)) return "Adresse introuvable sur votre réseau local. Vérifiez l'adresse IP.";
     if (/i\/o timeout|deadline exceeded|timeout/i.test(s)) return "Aucune réponse reçue (délai dépassé). Vérifiez l'adresse IP, le pare-feu ou l'activation SNMP.";
@@ -1095,7 +1098,8 @@
 
     list.innerHTML = filtered
       .map(({ item, idx }) => {
-        const needsConfig = item.suggested_probe && item.suggested_probe.kind === "proxmox";
+        const kind = item.suggested_probe && item.suggested_probe.kind;
+        const needsConfig = kind === "proxmox" || kind === "windows_winrm" || kind === "linux_ssh";
         const actionHTML = item.already_monitored
           ? '<span class="status-cell is-ok"><span class="status-dot is-ok"></span>Déjà surveillé</span>'
           : needsConfig
@@ -1121,9 +1125,14 @@
         const idx = Number(btn.dataset.configureDiscovered);
         const item = state.lanItems[idx];
         if (!item || !item.suggested_probe) return;
+        const kind = item.suggested_probe.kind;
+        let sub = "Complétez les informations ci-dessous puis testez la connexion.";
+        if (kind === "proxmox") sub = "Renseignez votre jeton API Proxmox VE puis testez la connexion.";
+        else if (kind === "windows_winrm") sub = "Renseignez vos identifiants Windows puis testez la connexion.";
+        else if (kind === "linux_ssh") sub = "Renseignez vos identifiants SSH Linux puis testez la connexion.";
         openProbeModalFromTemplate(
           item.suggested_probe,
-          "Renseignez votre jeton API Proxmox VE puis testez la connexion.",
+          sub,
           () => {
             item.already_monitored = true;
             renderLANResults();
@@ -1243,6 +1252,22 @@
           (p.node ? " · nœud " + p.node : "") +
           (p.vms && p.vms.length ? " · " + p.vms.length + " VM/LXC" : "")
         );
+      case "windows_winrm":
+        return (
+          (p.host || "") +
+          ":" +
+          (p.port || (p.use_https ? 5986 : 5985)) +
+          (p.use_https ? " (WinRM HTTPS)" : " (WinRM)") +
+          (p.vms && p.vms.length ? " · " + p.vms.length + " VM Hyper-V" : "")
+        );
+      case "linux_ssh":
+        return (
+          (p.host || "") +
+          ":" +
+          (p.port || 22) +
+          " (SSH)" +
+          (p.services && p.services.length ? " · " + p.services.length + " service(s)" : "")
+        );
       case "synology":
       case "snmp_oid":
         return (p.host || "") + " (SNMP)";
@@ -1288,6 +1313,39 @@
         return Object.assign(base, { id: "serveur-linux", url: "http://192.168.1.10:9100/metrics", max_disk_percent: 90, max_ram_percent: 92 });
       case "windows_exporter":
         return Object.assign(base, { id: "serveur-windows", url: "http://192.168.1.15:9182/metrics", services: ["W32Time"], max_disk_percent: 90, max_ram_percent: 92 });
+      case "windows_winrm":
+        return Object.assign(base, {
+          id: "windows-host",
+          timeout: "15s",
+          host: "192.168.1.40",
+          port: 5985,
+          use_https: false,
+          insecure_skip_verify: true,
+          user: "Administrator",
+          password: "",
+          domain: "",
+          vms: [],
+          services: [],
+          disks: [],
+          max_cpu_percent: 90,
+          max_ram_percent: 90,
+          max_disk_percent: 90
+        });
+      case "linux_ssh":
+        return Object.assign(base, {
+          id: "linux-ssh",
+          timeout: "15s",
+          host: "192.168.1.45",
+          port: 22,
+          user: "monitor",
+          password: "",
+          ssh_key: "",
+          services: [],
+          disks: [],
+          max_cpu_percent: 90,
+          max_ram_percent: 90,
+          max_disk_percent: 90
+        });
       default:
         return base;
     }
@@ -1502,6 +1560,75 @@
         break;
       }
 
+      case "windows_winrm": {
+        if (p.insecure_skip_verify === undefined) p.insecure_skip_verify = true;
+        if (!p.port) p.port = p.use_https ? 5986 : 5985;
+        simpleHTML =
+          '<div class="help-callout">Surveillance <strong>sans agent</strong> via WinRM (actif d\'origine sur Windows Server ; sur Windows 10/11 exécutez <span class="mono-inline">Enable-PSRemoting -Force</span> en PowerShell Administrateur). Les échanges HTTP 5985 sont chiffrés en NTLMv2 et les <strong>VM Hyper-V</strong> sont détectées automatiquement.</div>' +
+          '<label class="field"><span class="field-label">Adresse IP ou nom Windows</span>' +
+          '<input type="text" class="mono" data-mp="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.40" required></label>' +
+          '<label class="field"><span class="field-label">Nom d\'utilisateur</span>' +
+          '<input type="text" class="mono" data-mp="user" value="' + escapeHTML(p.user || "") + '" placeholder="Administrator ou DOMAINE\\admin" required></label>' +
+          '<div class="field span-2"><span class="field-label">Mot de passe</span>' +
+          '<div class="input-with-action">' +
+          '<input type="password" class="mono" id="mp-winrm-password" data-mp="password" autocomplete="off" value="' + escapeHTML(p.password || "") + '" placeholder="Mot de passe du compte Windows" required>' +
+          '<button type="button" class="field-action" data-toggle-secret="mp-winrm-password">Afficher</button>' +
+          "</div></div>" +
+          '<label class="field span-2"><span class="field-label">VM Hyper-V critiques à vérifier (optionnel, séparées par des virgules)</span>' +
+          '<input type="text" class="mono" data-mp="vms" data-type="csv" value="' + escapeHTML((p.vms || []).join(", ")) + '" placeholder="Ex. SRV-AD, DockerHost"></label>' +
+          '<label class="field span-2"><span class="field-label">Services Windows critiques (optionnel, séparés par des virgules)</span>' +
+          '<input type="text" class="mono" data-mp="services" data-type="csv" value="' + escapeHTML((p.services || []).join(", ")) + '" placeholder="Ex. W32Time, vmms"></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Alerte CPU (%)</span>' +
+          '<input type="number" step="any" data-mp="max_cpu_percent" data-type="float" value="' + escapeHTML(p.max_cpu_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte mémoire RAM (%)</span>' +
+          '<input type="number" step="any" data-mp="max_ram_percent" data-type="float" value="' + escapeHTML(p.max_ram_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte espace disque plein (%)</span>' +
+          '<input type="number" step="any" data-mp="max_disk_percent" data-type="float" value="' + escapeHTML(p.max_disk_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Disques à suivre (optionnel)</span>' +
+          '<input type="text" class="mono" data-mp="disks" data-type="csv" value="' + escapeHTML((p.disks || []).join(", ")) + '" placeholder="Ex. C:, D:"></label>' +
+          '<label class="field"><span class="field-label">Domaine Windows / AD (optionnel)</span>' +
+          '<input type="text" class="mono" data-mp="domain" value="' + escapeHTML(p.domain || "") + '" placeholder="WORKGROUP ou CORP"></label>' +
+          '<label class="field"><span class="field-label">Port WinRM</span>' +
+          '<input type="number" class="mono" id="mp-winrm-port" data-mp="port" data-type="int" value="' + escapeHTML(p.port || 5985) + '"></label>' +
+          '<div class="field"><span class="field-label">Transport WinRM HTTPS (port 5986)</span>' +
+          '<label class="switch-control"><input type="checkbox" id="mp-winrm-https" data-mp="use_https" data-type="bool"' + (p.use_https ? " checked" : "") + '><span class="switch-track"></span><span class="switch-text">HTTPS</span></label></div>' +
+          '<div class="field"><span class="field-label">Certificat HTTPS auto-signé</span>' +
+          '<label class="switch-control"><input type="checkbox" data-mp="insecure_skip_verify" data-type="bool"' + (p.insecure_skip_verify ? " checked" : "") + '><span class="switch-track"></span><span class="switch-text">Accepter</span></label></div>';
+        break;
+      }
+
+      case "linux_ssh": {
+        if (!p.port) p.port = 22;
+        simpleHTML =
+          '<div class="help-callout">Surveillance Linux <strong>sans aucun agent</strong> via SSH (CPU, RAM, disques montés et services <span class="mono-inline">systemd</span>).</div>' +
+          '<label class="field"><span class="field-label">Adresse IP ou nom d\'hôte Linux</span>' +
+          '<input type="text" class="mono" data-mp="host" value="' + escapeHTML(p.host || "") + '" placeholder="192.168.1.45" required></label>' +
+          '<label class="field"><span class="field-label">Nom d\'utilisateur SSH</span>' +
+          '<input type="text" class="mono" data-mp="user" value="' + escapeHTML(p.user || "") + '" placeholder="root, ubuntu, debian..." required></label>' +
+          '<div class="field span-2"><span class="field-label">Mot de passe SSH (ou laissez vide si vous utilisez une clé privée dans Options avancées)</span>' +
+          '<div class="input-with-action">' +
+          '<input type="password" class="mono" id="mp-ssh-password" data-mp="password" autocomplete="off" value="' + escapeHTML(p.password || "") + '" placeholder="Mot de passe SSH">' +
+          '<button type="button" class="field-action" data-toggle-secret="mp-ssh-password">Afficher</button>' +
+          "</div></div>" +
+          '<label class="field span-2"><span class="field-label">Services systemd critiques (optionnel, séparés par des virgules)</span>' +
+          '<input type="text" class="mono" data-mp="services" data-type="csv" value="' + escapeHTML((p.services || []).join(", ")) + '" placeholder="Ex. docker, nginx, ssh"></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Port SSH</span>' +
+          '<input type="number" class="mono" data-mp="port" data-type="int" value="' + escapeHTML(p.port || 22) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte CPU (%)</span>' +
+          '<input type="number" step="any" data-mp="max_cpu_percent" data-type="float" value="' + escapeHTML(p.max_cpu_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte mémoire RAM (%)</span>' +
+          '<input type="number" step="any" data-mp="max_ram_percent" data-type="float" value="' + escapeHTML(p.max_ram_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte espace disque plein (%)</span>' +
+          '<input type="number" step="any" data-mp="max_disk_percent" data-type="float" value="' + escapeHTML(p.max_disk_percent || 90) + '"></label>' +
+          '<label class="field span-2"><span class="field-label">Points de montage à suivre (optionnel)</span>' +
+          '<input type="text" class="mono" data-mp="disks" data-type="csv" value="' + escapeHTML((p.disks || []).join(", ")) + '" placeholder="Ex. /, /data"></label>' +
+          '<label class="field span-2"><span class="field-label">Clé privée SSH PEM (optionnel, remplace le mot de passe)</span>' +
+          '<textarea rows="3" class="mono" data-mp="ssh_key" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----">' + escapeHTML(p.ssh_key || "") + "</textarea></label>";
+        break;
+      }
+
       case "snmp_oid":
         simpleHTML =
           '<label class="field"><span class="field-label">Adresse IP de l\'appareil</span>' +
@@ -1552,6 +1679,20 @@
     if (pveHost) {
       pveHost.addEventListener("input", () => {
         state.modalProbeDraft.url = buildProxmoxURL(pveHost.value);
+      });
+    }
+
+    const winrmHTTPS = $("mp-winrm-https");
+    if (winrmHTTPS) {
+      winrmHTTPS.addEventListener("change", () => {
+        const portInput = $("mp-winrm-port");
+        if (!portInput) return;
+        const cur = Number(portInput.value || 0);
+        if (!cur || cur === 5985 || cur === 5986) {
+          const nextPort = winrmHTTPS.checked ? 5986 : 5985;
+          portInput.value = String(nextPort);
+          state.modalProbeDraft.port = nextPort;
+        }
       });
     }
 

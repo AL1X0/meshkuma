@@ -258,6 +258,42 @@ func TestWebUIServerEndpointsAndAuth(t *testing.T) {
 		t.Fatalf("proxmox probes/test unexpected result: %+v err=%v", pveRes, err)
 	}
 
+	// 6b2. POST /api/validate accepts windows_winrm and linux_ssh DTO round-trips
+	validateDTO := configToDTO(parsed)
+	validateDTO.Probes = append(validateDTO.Probes,
+		ProbeDTO{
+			ID:             "win-hv",
+			Kind:           "windows_winrm",
+			Host:           "192.168.1.40",
+			User:           `CORP\Administrator`,
+			Password:       "pw-win",
+			MaxCPUPercent:  90,
+			MaxRAMPercent:  90,
+			MaxDiskPercent: 90,
+			VMs:            []string{"VM-APP"},
+		},
+		ProbeDTO{
+			ID:             "lin-ssh",
+			Kind:           "linux_ssh",
+			Host:           "192.168.1.45",
+			User:           "monitor",
+			Password:       "pw-ssh",
+			MaxCPUPercent:  90,
+			MaxRAMPercent:  90,
+			MaxDiskPercent: 90,
+			Services:       []string{"ssh", "docker"},
+		},
+	)
+	valPayload, _ := json.Marshal(map[string]any{"config": validateDTO})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/validate", bytes.NewReader(valPayload))
+	req.Header.Set("Authorization", "Bearer super-secret-token")
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"windows_winrm"`) || !strings.Contains(rec.Body.String(), `"linux_ssh"`) {
+		t.Fatalf("POST /api/validate failed for windows_winrm/linux_ssh: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
 	// 6c. POST /api/probes/run triggers immediate refresh
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/probes/run", strings.NewReader("{}"))

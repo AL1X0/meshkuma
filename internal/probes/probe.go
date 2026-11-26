@@ -113,6 +113,10 @@ func BuildFromConfig(cfgs []config.ProbeConfig) ([]ScheduledProbe, error) {
 			p = NewWindowsExporterProbe(pc)
 		case "proxmox":
 			p = NewProxmoxProbe(pc)
+		case "windows_winrm":
+			p = NewWindowsWinRMProbe(pc)
+		case "linux_ssh":
+			p = NewLinuxSSHProbe(pc)
 		default:
 			return nil, fmt.Errorf("probe %q: unsupported kind %q", pc.ID, pc.Kind)
 		}
