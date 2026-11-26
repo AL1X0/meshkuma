@@ -16,7 +16,7 @@
     http: { label: "HTTP / HTTPS", badge: "HTTP", host: false },
     tcp: { label: "Port TCP", badge: "TCP", host: false },
     docker: { label: "Docker", badge: "DOCKER", host: false },
-    synology: { label: "Synology DSM", badge: "SYNOLOGY", host: true },
+    synology: { label: "Synology SNMP", badge: "SYNOLOGY", host: true },
     proxmox: { label: "Proxmox VE", badge: "PROXMOX", host: true },
     windows_winrm: { label: "Windows WinRM", badge: "WINDOWS", host: true },
     linux_ssh: { label: "Linux SSH", badge: "LINUX", host: true },
@@ -26,18 +26,41 @@
   };
 
   const PROBE_GUIDES = {
-    proxmox: "Dans Proxmox VE : Datacenter → Permissions → API Tokens → Add (ex. root@pam!meshwatch), décochez Privilege Separation ou donnez le rôle PVEAuditor sur /. Renseignez Token ID et Secret.",
-    synology: "Sur votre NAS Synology DSM : créez un compte dédié en lecture seule (groupe users) ou administrateur avec accès à DSM. MeshWatch interroge les capteurs disques, RAID et ventilateurs.",
-    windows_winrm: "Activez WinRM sur Windows/Hyper-V : exécutez « winrm quickconfig » puis « Enable-PSRemoting -Force » en PowerShell admin. Pour HTTP LAN sans TLS : « winrm set winrm/config/service @{AllowUnencrypted=\"true\"} » et Authentification Basic.",
+    proxmox: "Dans Proxmox VE : Datacenter → Permissions → API Tokens → Add (ex. root@pam!meshwatch), décochez Privilege Separation ou accordez le rôle PVEAuditor sur /. Renseignez Token ID et Secret.",
+    synology: "Dans Synology DSM : Panneau de configuration → Terminal et SNMP → Activer le service SNMP (v2c recommandé en LAN, ou SNMPv3 chiffré). Port UDP 161 par défaut.",
+    windows_winrm: "Activez WinRM sur Windows/Hyper-V : exécutez « winrm quickconfig » puis « Enable-PSRemoting -Force » en PowerShell admin. Pour HTTP LAN sans TLS : « winrm set winrm/config/service @{AllowUnencrypted=\"true\"} » et Auth Basic.",
     linux_ssh: "Sous Linux : indiquez l'utilisateur SSH et un mot de passe ou une clé privée PEM/OpenSSH (lecture seule : /proc/stat, /proc/meminfo, df, systemctl).",
     docker: "Surveille l'état et la santé de vos conteneurs locaux via /var/run/docker.sock monté en lecture seule dans MeshWatch."
   };
+
+  function loadStoredToken() {
+    try {
+      return (localStorage.getItem(STORAGE.token) || sessionStorage.getItem(STORAGE.token) || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  function persistToken(tok) {
+    const clean = String(tok || "").trim();
+    try {
+      if (clean) {
+        localStorage.setItem(STORAGE.token, clean);
+        sessionStorage.setItem(STORAGE.token, clean);
+      } else {
+        localStorage.removeItem(STORAGE.token);
+        sessionStorage.removeItem(STORAGE.token);
+      }
+    } catch {
+      /* ignore storage errors in restricted contexts */
+    }
+  }
 
   const state = {
     tab: "home",
     discoverSubtab: localStorage.getItem(STORAGE.subtab) || "docker",
     theme: localStorage.getItem(STORAGE.theme) || "dark",
-    token: localStorage.getItem(STORAGE.token) || "",
+    token: loadStoredToken(),
     status: null,
     config: null,
     draft: null,
@@ -53,7 +76,6 @@
     inspectorTab: localStorage.getItem(STORAGE.inspTab) || "overview",
     editingIndex: -1,
     modalKind: "http",
-    lastTestedProbeID: "",
     dirty: false,
     ledBusyUntil: 0,
     ledBusyMode: "orbit",
@@ -83,6 +105,38 @@
     return JSON.parse(JSON.stringify(obj));
   }
 
+  function ensureDraftShape(cfg) {
+    const d = cfg && typeof cfg === "object" ? clone(cfg) : {};
+    if (!d.node || typeof d.node !== "object") {
+      d.node = {
+        name: "mon-homelab",
+        private_key_hex: "",
+        group_psk_hex: "",
+        heartbeat_interval: "30s",
+        peer_timeout: "1m30s"
+      };
+    }
+    if (!d.logging || typeof d.logging !== "object") {
+      d.logging = { level: "info", format: "text" };
+    }
+    if (!d.nostr || typeof d.nostr !== "object") {
+      d.nostr = { relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"] };
+    }
+    if (!Array.isArray(d.nostr.relays)) d.nostr.relays = [];
+    if (!d.auto_mute || typeof d.auto_mute !== "object") {
+      d.auto_mute = { targets: ["1.1.1.1:443", "9.9.9.9:443"], timeout: "3s" };
+    }
+    if (!Array.isArray(d.auto_mute.targets)) d.auto_mute.targets = [];
+    if (!Array.isArray(d.peers)) d.peers = [];
+    if (!Array.isArray(d.probes)) d.probes = [];
+    if (!d.notifications || typeof d.notifications !== "object") d.notifications = {};
+    if (!d.notifications.ntfy || typeof d.notifications.ntfy !== "object") d.notifications.ntfy = { enabled: false };
+    if (!d.notifications.photon_imessage || typeof d.notifications.photon_imessage !== "object") {
+      d.notifications.photon_imessage = { enabled: false, mode: "cloud" };
+    }
+    return d;
+  }
+
   function showToast(msg, tone = "ok") {
     const el = $("toast-bar");
     if (!el) return;
@@ -92,7 +146,7 @@
     clearTimeout(state.toastTimer);
     state.toastTimer = setTimeout(() => {
       el.hidden = true;
-    }, 3600);
+    }, 3800);
   }
 
   function fmtUptime(sec) {
@@ -126,15 +180,6 @@
     return Math.round(v) + " Mo";
   }
 
-  function probeTargetLabel(p) {
-    if (!p) return "—";
-    if (p.url) return p.url;
-    if (p.address) return p.address;
-    if (p.target) return p.target + (p.oid ? " · " + p.oid : "");
-    if (p.kind === "docker") return p.containers && p.containers.length ? p.containers.join(", ") : p.docker_socket || "Docker local";
-    return PROBE_KINDS[p.kind]?.label || p.kind || "—";
-  }
-
   function splitCSV(text) {
     return String(text || "")
       .split(/[,\n]+/)
@@ -149,8 +194,32 @@
       .filter(Boolean);
   }
 
+  function splitHostPort(raw, defaultPort) {
+    const s = String(raw || "").trim();
+    if (!s) return { host: "", port: defaultPort };
+    const idx = s.lastIndexOf(":");
+    if (idx > 0 && /^\d+$/.test(s.slice(idx + 1))) {
+      return { host: s.slice(0, idx), port: Number(s.slice(idx + 1)) || defaultPort };
+    }
+    return { host: s, port: defaultPort };
+  }
+
   function isHostKind(kind) {
     return Boolean(PROBE_KINDS[kind]?.host);
+  }
+
+  function probeTargetLabel(p) {
+    if (!p) return "—";
+    if (p.url) return p.url;
+    if (p.address) return p.address;
+    if (p.host) {
+      const base = p.port ? p.host + ":" + p.port : p.host;
+      return p.oid ? base + " · " + p.oid : base;
+    }
+    if (p.kind === "docker") {
+      return p.containers && p.containers.length ? p.containers.join(", ") : p.socket || "Docker local";
+    }
+    return PROBE_KINDS[p.kind]?.label || p.kind || "—";
   }
 
   /* -------------------- Theme & Hardware LED State -------------------- */
@@ -252,7 +321,9 @@
     if (state.token) headers["Authorization"] = "Bearer " + state.token;
     const res = await fetch(path, Object.assign({}, opts, { headers }));
     if (res.status === 401) {
-      openAuthGate("Jeton requis ou expiré.");
+      state.token = "";
+      persistToken("");
+      openAuthGate("Jeton invalide ou expiré.");
       throw new Error("Non autorisé (401)");
     }
     const text = await res.text();
@@ -265,7 +336,8 @@
       }
     }
     if (!res.ok) {
-      throw new Error(data.error || data.message || ("HTTP " + res.status));
+      const msg = (data.errors && data.errors.join(" · ")) || data.error || data.message || ("HTTP " + res.status);
+      throw new Error(msg);
     }
     return data;
   }
@@ -285,14 +357,21 @@
   async function submitAuthToken() {
     const val = ($("auth-token-input")?.value || "").trim();
     if (!val) return;
-    state.token = val;
-    localStorage.setItem(STORAGE.token, val);
     try {
-      const check = await apiFetch("/api/auth/check", { method: "GET" });
+      const res = await fetch("/api/auth/check", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + val
+        }
+      });
+      const check = await res.json().catch(() => ({}));
       if (check.auth_required && !check.authenticated) {
         openAuthGate("Jeton invalide.");
         return;
       }
+      state.token = val;
+      persistToken(val);
       $("auth-gate").hidden = true;
       await loadInitialData();
     } catch (e) {
@@ -313,9 +392,14 @@
         openAuthGate();
         return;
       }
+      if (state.token && check.authenticated) {
+        persistToken(state.token);
+      }
       await loadInitialData();
     } catch (e) {
-      showToast("Erreur de connexion au serveur : " + e.message, "err");
+      if (!String(e.message || "").includes("401")) {
+        showToast("Erreur de connexion au serveur : " + e.message, "err");
+      }
     }
   }
 
@@ -339,7 +423,7 @@
 
   async function fetchConfig() {
     const res = await apiFetch("/api/config", { method: "GET" });
-    state.config = res.config || {};
+    state.config = ensureDraftShape(res.config);
     state.draft = clone(state.config);
     state.rawYAML = res.yaml || "";
     state.dirty = false;
@@ -358,7 +442,7 @@
   }
 
   async function saveConfiguration(showMsg = true) {
-    if (!state.draft) return;
+    if (!state.draft) return false;
     pullConfigFormsIntoDraft();
     triggerLEDBusy("sweep", "Sauvegarde config", "RECHARGEMENT", 2200);
     try {
@@ -366,16 +450,24 @@
         method: "PUT",
         body: JSON.stringify({ config: state.draft })
       });
-      state.config = res.config || clone(state.draft);
+      state.config = ensureDraftShape(res.config || state.draft);
       state.draft = clone(state.config);
       state.rawYAML = res.yaml || "";
       state.dirty = false;
       syncUnsavedBar();
       await fetchStatus();
       renderConfigForms();
-      if (showMsg) showToast("Configuration enregistrée et appliquée.");
+      if (showMsg) {
+        if (res.persisted === false) {
+          showToast("Activé en mémoire (config.yaml en lecture seule).", "warn");
+        } else {
+          showToast("Configuration enregistrée et appliquée.");
+        }
+      }
+      return true;
     } catch (e) {
       showToast("Erreur d'enregistrement : " + e.message, "err");
+      return false;
     }
   }
 
@@ -564,7 +656,6 @@
         connRelays + "/" + relays.length + " relais Nostr";
     }
 
-    // Onboarding todo strip
     const hasNode = st.mode !== "setup" && Boolean(st.node_name);
     const hasProbes = cfgProbes.length > 0 || probes.length > 0;
     const hasPeers = peers.length > 0;
@@ -579,7 +670,6 @@
       if ($("todo-mark-friends")) $("todo-mark-friends").textContent = hasPeers ? "✓" : "3";
     }
 
-    // Metric Cards
     const pct = probes.length ? Math.round((okCount / probes.length) * 100) : 100;
     if ($("mc-probes-val")) $("mc-probes-val").innerHTML = okCount + " <small>/ " + probes.length + "</small>";
     if ($("mc-probes-dot")) $("mc-probes-dot").className = "status-dot " + (okCount < probes.length ? "is-err" : "is-ok");
@@ -632,7 +722,6 @@
     if ($("mc-mesh-sub")) $("mc-mesh-sub").textContent = connRelays + "/" + relays.length + " relais Nostr · " + (st.muted ? "Auto-mute actif" : "En veille");
     if ($("mc-mesh-spark")) $("mc-mesh-spark").innerHTML = MW().sparklineHTML(relays.map((r) => (r.connected ? 100 : 10)), { color: "var(--primary)", fluid: true, max: 100 });
 
-    // Fleet Table + Inspector
     renderFleetTable(st);
     renderInspector(st);
     renderTopologyAndPeers(st);
@@ -677,7 +766,6 @@
       return (a.id || "").localeCompare(b.id || "");
     });
 
-    // Ensure valid selection
     if (probes.length && (!state.selectedProbeID || !probes.some((p) => p.id === state.selectedProbeID))) {
       selectProbe((list[0] || probes[0]).id, false);
     }
@@ -704,25 +792,25 @@
 
       let col3 = '<span style="color:var(--text-faint);">—</span>';
       if (typeof m.cpu_percent === "number") {
-        col3 = '<div>' + Math.round(m.cpu_percent) + '%</div>' + MW().meterHTML(m.cpu_percent, 75, 90);
+        col3 = "<div>" + Math.round(m.cpu_percent) + "%</div>" + MW().meterHTML(m.cpu_percent, 75, 90);
       } else if (typeof m.temp_c === "number") {
-        col3 = '<span class="' + (m.temp_c >= 65 ? "badge warn" : "badge ok") + '">' + Math.round(m.temp_c) + ' °C</span>';
+        col3 = '<span class="' + (m.temp_c >= 65 ? "badge warn" : "badge ok") + '">' + Math.round(m.temp_c) + " °C</span>";
       } else if (typeof m.tls_days === "number") {
-        col3 = '<span class="mono">TLS ' + m.tls_days + 'j</span>';
+        col3 = '<span class="mono">TLS ' + m.tls_days + "j</span>";
       }
 
       let col4 = '<span style="color:var(--text-faint);">—</span>';
       if (typeof m.ram_percent === "number") {
-        col4 = '<div>RAM ' + Math.round(m.ram_percent) + '%</div>' + (typeof m.disk_max_pct === "number" ? '<div style="font-size:10.5px;color:var(--text-faint);">Disk ' + Math.round(m.disk_max_pct) + '%</div>' : "");
+        col4 = "<div>RAM " + Math.round(m.ram_percent) + "%</div>" + (typeof m.disk_max_pct === "number" ? '<div style="font-size:10.5px;color:var(--text-faint);">Disk ' + Math.round(m.disk_max_pct) + "%</div>" : "");
       } else if (m.containers && m.containers.length) {
-        col4 = '<span class="mono">' + m.containers.length + ' conteneur(s)</span>';
+        col4 = '<span class="mono">' + m.containers.length + " conteneur(s)</span>";
       } else if (typeof m.http_status === "number") {
-        col4 = '<span class="mono">HTTP ' + m.http_status + '</span>';
+        col4 = '<span class="mono">HTTP ' + m.http_status + "</span>";
       }
 
       return (
         '<tr class="clickable' + selected + '" data-select-probe="' + esc(p.id) + '">' +
-        '<td>' +
+        "<td>" +
           '<div class="ct-name">' +
             '<span class="status-dot ' + (p.ok ? "is-ok" : "is-err") + '"></span>' +
             '<div style="min-width:0;">' +
@@ -735,7 +823,7 @@
         '<td class="num">' + col3 + "</td>" +
         '<td class="num">' + col4 + "</td>" +
         '<td class="num">' +
-          '<div>' + esc(p.latency_ms) + ' ms</div>' +
+          "<div>" + esc(p.latency_ms) + " ms</div>" +
           MW().uptimeStripHTML(hist, false, 14) +
         "</td>" +
         '<td class="num">' +
@@ -839,14 +927,12 @@
   function renderInspectorOverview(body, probe, m, hist, cfg) {
     let html = "";
 
-    // Uptime Strip
     html +=
       '<div class="res-item">' +
-      '<div class="res-group-title">Disponibilité sur les derniers contrôles (' + hist.length + ' pts)</div>' +
+      '<div class="res-group-title">Disponibilité sur les derniers contrôles (' + hist.length + " pts)</div>" +
       MW().uptimeStripHTML(hist, false, 28) +
       "</div>";
 
-    // Rings for CPU / RAM / Disk / Temp / TLS
     const rings = [];
     if (typeof m.cpu_percent === "number") {
       rings.push(MW().ringHTML(m.cpu_percent, { size: 78, sub: "CPU" }));
@@ -870,14 +956,12 @@
       html += '<div style="display:flex;gap:14px;flex-wrap:wrap;justify-content:space-around;padding:8px 0;">' + rings.join("") + "</div>";
     }
 
-    // Time-series charts containers
     html += '<div id="insp-chart-latency"></div>';
     if (hist.some((pt) => typeof pt.cpu === "number")) html += '<div id="insp-chart-cpu"></div>';
     if (hist.some((pt) => typeof pt.ram === "number")) html += '<div id="insp-chart-ram"></div>';
     if (hist.some((pt) => typeof pt.disk === "number")) html += '<div id="insp-chart-disk"></div>';
     if (hist.some((pt) => typeof pt.temp === "number")) html += '<div id="insp-chart-temp"></div>';
 
-    // KV Metadata
     const kvs = [
       ["Cible", m.target || probeTargetLabel(cfg)],
       ["Hôte / OS", [m.hostname, m.os].filter(Boolean).join(" · ") || null],
@@ -886,12 +970,12 @@
       ["Uptime machine", m.uptime_sec ? fmtUptime(m.uptime_sec) : null],
       ["Certificat TLS", m.tls_subject ? m.tls_subject + (m.tls_expiry ? " (exp. " + m.tls_expiry + ")" : "") : null],
       ["Valeur SNMP", m.snmp_value || null],
-      ["Cadence sonde", cfg ? (cfg.interval_sec || 30) + "s (timeout " + (cfg.timeout_sec || 10) + "s)" : null]
+      ["Cadence sonde", cfg ? (cfg.interval || "1m") + " (timeout " + (cfg.timeout || "10s") + ")" : null]
     ].filter((pair) => pair[1]);
 
     if (kvs.length) {
       html += '<div class="res-item"><div class="res-group-title">Détails techniques</div><dl class="kv">' +
-        kvs.map(([k, v]) => "<dt>" + esc(k) + "</dt><dd class=\"mono\">" + esc(v) + "</dd>").join("") +
+        kvs.map(([k, v]) => "<dt>" + esc(k) + '</dt><dd class="mono">' + esc(v) + "</dd>").join("") +
         "</dl></div>";
     }
 
@@ -1118,7 +1202,7 @@
           return (
             '<div class="surface-row" style="cursor:pointer;" data-open-peer="' + esc(p.pubkey_hex) + '">' +
               '<div class="row-main">' +
-                '<div class="row-title-line"><span class="status-dot ' + cls + '"></span><span class="row-title">' + esc(p.name) + '</span></div>' +
+                '<div class="row-title-line"><span class="status-dot ' + cls + '"></span><span class="row-title">' + esc(p.name) + "</span></div>" +
                 '<div class="row-sub">' + esc(fmtAge(p.last_seen)) + " · " + esc((p.probes || []).length) + " sondes</div>" +
               "</div>" +
               '<div class="row-right"><span class="badge ' + (cls === "is-ok" ? "ok" : cls === "is-warn" ? "warn" : cls === "is-err" ? "danger" : "") + '">' + label + "</span></div>" +
@@ -1275,29 +1359,30 @@
   }
 
   async function applyDockerSelection() {
-    if (!state.draft) return;
+    if (!state.draft) state.draft = ensureDraftShape(state.config);
     const selected = Array.from(document.querySelectorAll("[data-docker-name]:checked")).map((cb) => cb.dataset.dockerName);
     const sock = ($("docker-socket-input")?.value || "/var/run/docker.sock").trim();
-    if (!state.draft.probes) state.draft.probes = [];
     let dockerProbe = state.draft.probes.find((p) => p.kind === "docker");
     if (!selected.length) {
       state.draft.probes = state.draft.probes.filter((p) => p.kind !== "docker");
     } else if (dockerProbe) {
-      dockerProbe.docker_socket = sock;
+      dockerProbe.socket = sock;
       dockerProbe.containers = selected;
     } else {
       state.draft.probes.push({
         id: "conteneurs-docker",
         kind: "docker",
-        docker_socket: sock,
+        socket: sock,
         containers: selected,
-        interval_sec: 30,
-        timeout_sec: 10
+        interval: "30s",
+        timeout: "10s"
       });
     }
-    await saveConfiguration(false);
-    await runDockerScan(true);
-    showToast("Sonde Docker mise à jour (" + selected.length + " conteneurs).");
+    const saved = await saveConfiguration(false);
+    if (saved) {
+      await runDockerScan(true);
+      showToast("Sonde Docker mise à jour (" + selected.length + " conteneurs).");
+    }
   }
 
   async function runLANScan() {
@@ -1356,7 +1441,7 @@
       return;
     }
 
-    el.innerHTML = items.map((it, idx) => (
+    el.innerHTML = items.map((it) => (
       '<div class="surface-row">' +
         '<div class="row-main">' +
           '<div class="row-title-line">' +
@@ -1429,7 +1514,7 @@
     });
   }
 
-  /* -------------------- Probe Modal (All 10 Kinds) -------------------- */
+  /* -------------------- Probe Modal (All 10 ProbeDTO Kinds) -------------------- */
 
   function openProbeModal(editIndex = -1) {
     state.editingIndex = editIndex;
@@ -1458,6 +1543,46 @@
     modal.hidden = false;
   }
 
+  function syncSNMPVersionFields() {
+    const ver = $("pf-snmp-version")?.value || "2c";
+    const v2El = $("pf-snmp-v2");
+    const v3El = $("pf-snmp-v3");
+    if (v2El) v2El.hidden = ver === "3";
+    if (v3El) v3El.hidden = ver !== "3";
+  }
+
+  function snmpFieldsHTML(preset) {
+    const ver = String(preset.snmp_version || "2c") === "3" ? "3" : "2c";
+    const authOpts = ["NONE", "MD5", "SHA", "SHA256", "SHA512"]
+      .map((a) => '<option value="' + a + '"' + ((preset.auth_proto || "SHA256").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>")
+      .join("");
+    const privOpts = ["NONE", "DES", "AES", "AES192", "AES256"]
+      .map((a) => '<option value="' + a + '"' + ((preset.priv_proto || "AES").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>")
+      .join("");
+
+    return (
+      '<div class="form-grid three-col">' +
+        '<label class="field"><span class="field-label">IP / Hôte SNMP</span><input type="text" id="pf-host" value="' + esc(preset.host || "") + '" placeholder="192.168.1.20" required /></label>' +
+        '<label class="field"><span class="field-label">Port UDP</span><input type="number" id="pf-port" value="' + esc(preset.port || 161) + '" /></label>' +
+        '<label class="field"><span class="field-label">Version SNMP</span><select id="pf-snmp-version"><option value="2c"' + (ver === "2c" ? " selected" : "") + '>SNMP v2c</option><option value="3"' + (ver === "3" ? " selected" : "") + ">SNMP v3 (chiffré)</option></select></label>" +
+      "</div>" +
+      '<div id="pf-snmp-v2"' + (ver === "3" ? " hidden" : "") + ">" +
+        '<label class="field"><span class="field-label">Communauté SNMP</span><input type="text" id="pf-community" value="' + esc(preset.community || "public") + '" /></label>' +
+      "</div>" +
+      '<div id="pf-snmp-v3" class="form-grid"' + (ver === "3" ? "" : " hidden") + ">" +
+        '<div class="form-grid three-col">' +
+          '<label class="field"><span class="field-label">Utilisateur SNMPv3</span><input type="text" id="pf-snmp-user" value="' + esc(preset.user || "") + '" /></label>' +
+          '<label class="field"><span class="field-label">Protocole Auth</span><select id="pf-auth-proto">' + authOpts + "</select></label>" +
+          '<label class="field"><span class="field-label">Mot de passe Auth</span><input type="password" id="pf-auth-pass" value="' + esc(preset.auth_pass || "") + '" /></label>' +
+        "</div>" +
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">Protocole Chiffrement</span><select id="pf-priv-proto">' + privOpts + "</select></label>" +
+          '<label class="field"><span class="field-label">Mot de passe Priv</span><input type="password" id="pf-priv-pass" value="' + esc(preset.priv_pass || "") + '" /></label>' +
+        "</div>" +
+      "</div>"
+    );
+  }
+
   function showProbeForm(kind, preset = {}, titleOverride = null) {
     state.modalKind = kind;
     $("probe-step-kind").hidden = true;
@@ -1473,8 +1598,8 @@
       gBox.textContent = guide || "";
     }
 
-    $("pf-interval").value = preset.interval_sec || 30;
-    $("pf-timeout").value = preset.timeout_sec || 10;
+    $("pf-interval").value = preset.interval || (kind === "http" || kind === "tcp" || kind === "docker" ? "30s" : "1m");
+    $("pf-timeout").value = preset.timeout || (kind === "windows_winrm" || kind === "linux_ssh" ? "15s" : "10s");
     $("pf-insecure").checked = Boolean(preset.insecure_skip_verify);
 
     const fields = $("probe-form-fields");
@@ -1490,96 +1615,126 @@
         '<div class="form-grid three-col">' +
           '<label class="field"><span class="field-label">Code HTTP attendu</span><input type="number" id="pf-http-status" value="' + esc(preset.expected_status || 200) + '" /></label>' +
           '<label class="field"><span class="field-label">Texte attendu (opt.)</span><input type="text" id="pf-contains" value="' + esc(preset.contains || "") + '" placeholder="healthy" /></label>' +
-          '<label class="field"><span class="field-label">Alerte TLS (jours)</span><input type="number" id="pf-tls-days" value="' + esc(preset.tls_min_days || 14) + '" /></label>' +
+          '<label class="field"><span class="field-label">Alerte TLS (jours)</span><input type="number" id="pf-tls-days" value="' + esc(preset.tls_min_days != null ? preset.tls_min_days : 14) + '" /></label>' +
         "</div>";
     } else if (kind === "tcp") {
-      html += '<label class="field"><span class="field-label">Adresse hôte:port</span><input type="text" id="pf-address" value="' + esc(preset.address || "") + '" placeholder="192.168.1.10:5432" required /></label>';
+      const hp = preset.host ? { host: preset.host, port: preset.port || 22 } : splitHostPort(preset.address, 22);
+      html +=
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">Hôte / IP</span><input type="text" id="pf-host" value="' + esc(hp.host) + '" placeholder="192.168.1.10" required /></label>' +
+          '<label class="field"><span class="field-label">Port TCP</span><input type="number" id="pf-port" value="' + esc(hp.port || 22) + '" required /></label>' +
+        "</div>";
     } else if (kind === "docker") {
       html +=
-        '<label class="field"><span class="field-label">Socket Docker</span><input type="text" id="pf-docker-socket" value="' + esc(preset.docker_socket || "/var/run/docker.sock") + '" /></label>' +
-        '<label class="field"><span class="field-label">Conteneurs à surveiller (séparés par virgule)</span><input type="text" id="pf-containers" value="' + esc((preset.containers || []).join(", ")) + '" placeholder="traefik, postgres, caddy" /></label>';
-    } else if (kind === "synology") {
-      html +=
-        '<label class="field"><span class="field-label">URL ou IP Synology DSM</span><input type="text" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="https://192.168.1.50:5001" required /></label>' +
+        '<label class="field"><span class="field-label">Socket Docker</span><input type="text" id="pf-socket" value="' + esc(preset.socket || "/var/run/docker.sock") + '" /></label>' +
+        '<label class="field"><span class="field-label">Conteneurs à surveiller (séparés par virgule)</span><input type="text" id="pf-containers" value="' + esc((preset.containers || []).join(", ")) + '" placeholder="traefik, postgres, caddy" /></label>' +
         '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Compte DSM</span><input type="text" id="pf-username" value="' + esc(preset.username || "") + '" /></label>' +
-          '<label class="field"><span class="field-label">Mot de passe DSM</span><input type="password" id="pf-password" value="' + esc(preset.password || "") + '" /></label>' +
+          '<label class="field"><span class="field-label">Label filtre (opt.)</span><input type="text" id="pf-label" value="' + esc(preset.label || "") + '" placeholder="meshwatch.enable=true" /></label>' +
+          '<label class="field"><span class="field-label">Restarts max tolérés (opt.)</span><input type="number" id="pf-max-restarts" value="' + esc(preset.max_restarts || "") + '" placeholder="0" /></label>' +
+        "</div>";
+    } else if (kind === "synology") {
+      html += snmpFieldsHTML(preset) +
+        '<label class="field"><span class="field-label">Température maximale disques/système (°C)</span><input type="number" id="pf-max-temp" value="' + esc(preset.max_temp_c || 55) + '" /></label>';
+    } else if (kind === "snmp_oid") {
+      html += snmpFieldsHTML(preset) +
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">OID SNMP</span><input type="text" id="pf-oid" class="mono" value="' + esc(preset.oid || ".1.3.6.1.2.1.1.3.0") + '" required /></label>' +
+          '<label class="field"><span class="field-label">Valeur attendue (opt.)</span><input type="text" id="pf-expected-value" value="' + esc(preset.expected_value || "") + '" /></label>' +
         "</div>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Température max (°C)</span><input type="number" id="pf-max-temp" value="' + esc(preset.max_temp_c || 60) + '" /></label>' +
-          '<label class="field" style="justify-content:flex-end;"><span class="checkbox-line"><input type="checkbox" id="pf-check-disks"' + (preset.check_disks !== false ? " checked" : "") + ' /><span>Vérifier disques</span></span></label>' +
-          '<label class="field" style="justify-content:flex-end;"><span class="checkbox-line"><input type="checkbox" id="pf-check-raid"' + (preset.check_raid !== false ? " checked" : "") + ' /><span>Vérifier RAID</span></span></label>' +
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">Valeur min (opt.)</span><input type="number" step="any" id="pf-min-value" value="' + esc(preset.min_value != null ? preset.min_value : "") + '" /></label>' +
+          '<label class="field"><span class="field-label">Valeur max (opt.)</span><input type="number" step="any" id="pf-max-value" value="' + esc(preset.max_value != null ? preset.max_value : "") + '" /></label>' +
         "</div>";
     } else if (kind === "proxmox") {
       html +=
-        '<label class="field"><span class="field-label">IP ou URL Proxmox VE</span><input type="text" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="https://192.168.1.10:8006" required /></label>' +
         '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Token ID</span><input type="text" id="pf-token-id" value="' + esc(preset.token_id || "") + '" placeholder="root@pam!meshwatch" /></label>' +
-          '<label class="field"><span class="field-label">Token Secret</span><input type="password" id="pf-token-secret" value="' + esc(preset.token_secret || "") + '" /></label>' +
+          '<label class="field"><span class="field-label">IP ou URL Proxmox VE</span><input type="text" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="https://192.168.1.10:8006" required /></label>' +
+          '<label class="field"><span class="field-label">Nœud Proxmox (opt.)</span><input type="text" id="pf-node" value="' + esc(preset.node || "") + '" placeholder="pve (tous si vide)" /></label>' +
+        "</div>" +
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">Token ID</span><input type="text" id="pf-token-id" class="mono" value="' + esc(preset.token_id || "") + '" placeholder="root@pam!meshwatch" /></label>' +
+          '<label class="field"><span class="field-label">Token Secret</span><input type="password" id="pf-token-secret" class="mono" value="' + esc(preset.token_secret || "") + '" /></label>' +
         "</div>" +
         '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_pct || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_pct || 92) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_pct || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
         "</div>" +
-        '<label class="field"><span class="field-label">VM ou conteneurs LXC critiques (VMID ou noms, séparés par virgule)</span><input type="text" id="pf-vms" value="' + esc((preset.vms || []).join(", ")) + '" placeholder="100, 101" /></label>';
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">VM ou conteneurs LXC critiques (VMID ou noms)</span><input type="text" id="pf-vms" value="' + esc((preset.vms || []).join(", ")) + '" placeholder="100, 101" /></label>' +
+          '<label class="field"><span class="field-label">Stockages surveillés (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="local, local-lvm" /></label>' +
+        "</div>";
     } else if (kind === "windows_winrm") {
       html +=
-        '<label class="field"><span class="field-label">IP ou URL WinRM Windows / Hyper-V</span><input type="text" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="192.168.1.120 ou https://192.168.1.120:5986/wsman" required /></label>' +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Utilisateur Windows (ex. Administrateur ou DOM\\user)</span><input type="text" id="pf-username" value="' + esc(preset.username || "") + '" /></label>' +
-          '<label class="field"><span class="field-label">Mot de passe</span><input type="password" id="pf-password" value="' + esc(preset.password || "") + '" /></label>' +
+        '<div class="form-grid three-col">' +
+          '<label class="field"><span class="field-label">Hôte ou IP Windows</span><input type="text" id="pf-host" value="' + esc(preset.host || "") + '" placeholder="192.168.1.40" required /></label>' +
+          '<label class="field"><span class="field-label">Port WinRM</span><input type="number" id="pf-port" value="' + esc(preset.port || 5985) + '" /></label>' +
+          '<label class="field" style="justify-content:flex-end;"><span class="checkbox-line"><input type="checkbox" id="pf-use-https"' + (preset.use_https ? " checked" : "") + ' /><span>WinRM HTTPS (5986)</span></span></label>' +
         "</div>" +
         '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_pct || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_pct || 92) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_pct || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Utilisateur Windows</span><input type="text" id="pf-user" value="' + esc(preset.user || "Administrator") + '" /></label>' +
+          '<label class="field"><span class="field-label">Mot de passe</span><input type="password" id="pf-password" value="' + esc(preset.password || "") + '" /></label>' +
+          '<label class="field"><span class="field-label">Domaine AD (opt.)</span><input type="text" id="pf-domain" value="' + esc(preset.domain || "") + '" placeholder="CORP" /></label>' +
         "</div>" +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">VMs Hyper-V critiques (optionnel)</span><input type="text" id="pf-vms" value="' + esc((preset.vms || []).join(", ")) + '" placeholder="DC01, SQL01" /></label>' +
-          '<label class="field"><span class="field-label">Services Windows critiques (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="W3SVC, Spooler" /></label>' +
+        '<div class="form-grid three-col">' +
+          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
+        "</div>" +
+        '<div class="form-grid three-col">' +
+          '<label class="field"><span class="field-label">VMs Hyper-V (opt.)</span><input type="text" id="pf-vms" value="' + esc((preset.vms || []).join(", ")) + '" placeholder="DC01, SQL01" /></label>' +
+          '<label class="field"><span class="field-label">Services Windows (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="W3SVC, Spooler" /></label>' +
+          '<label class="field"><span class="field-label">Lecteurs (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="C:, D:" /></label>' +
         "</div>";
     } else if (kind === "linux_ssh") {
       html +=
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Hôte ou IP:port SSH</span><input type="text" id="pf-address" value="' + esc(preset.address || "") + '" placeholder="192.168.1.40:22" required /></label>' +
-          '<label class="field"><span class="field-label">Utilisateur SSH</span><input type="text" id="pf-username" value="' + esc(preset.username || "root") + '" /></label>' +
+        '<div class="form-grid three-col">' +
+          '<label class="field"><span class="field-label">Hôte ou IP SSH</span><input type="text" id="pf-host" value="' + esc(preset.host || "") + '" placeholder="192.168.1.45" required /></label>' +
+          '<label class="field"><span class="field-label">Port SSH</span><input type="number" id="pf-port" value="' + esc(preset.port || 22) + '" /></label>' +
+          '<label class="field"><span class="field-label">Utilisateur SSH</span><input type="text" id="pf-user" value="' + esc(preset.user || "root") + '" /></label>' +
         "</div>" +
         '<label class="field"><span class="field-label">Mot de passe SSH (ou laissez vide si clé)</span><input type="password" id="pf-password" value="' + esc(preset.password || "") + '" /></label>' +
-        '<label class="field"><span class="field-label">Clé privée SSH PEM / OpenSSH (optionnel)</span><textarea id="pf-ssh-key" rows="3" class="mono" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----">' + esc(preset.ssh_private_key || "") + "</textarea></label>" +
+        '<label class="field"><span class="field-label">Clé privée SSH PEM / OpenSSH (optionnel)</span><textarea id="pf-ssh-key" rows="3" class="mono" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----">' + esc(preset.ssh_key || "") + "</textarea></label>" +
         '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_pct || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_pct || 92) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_pct || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
         "</div>" +
-        '<label class="field"><span class="field-label">Services systemd critiques (opt., séparés par virgule)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="docker, nginx, postgresql" /></label>';
+        '<div class="form-grid two-col">' +
+          '<label class="field"><span class="field-label">Services systemd critiques (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="docker, nginx" /></label>' +
+          '<label class="field"><span class="field-label">Points de montage (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="/, /var" /></label>' +
+        "</div>";
     } else if (kind === "node_exporter" || kind === "windows_exporter") {
       const defPort = kind === "windows_exporter" ? "9182" : "9100";
       html +=
         '<label class="field"><span class="field-label">URL Metrics Exporter</span><input type="url" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="http://192.168.1.10:' + defPort + '/metrics" required /></label>' +
         '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_pct || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-mem" value="' + esc(preset.max_mem_pct || 92) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_pct || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 92) + '" /></label>' +
+          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
+          '<label class="field"><span class="field-label">Disques / montages (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="' + (kind === "windows_exporter" ? "C:, D:" : "/, /home") + '" /></label>' +
         "</div>";
       if (kind === "windows_exporter") {
-        html += '<label class="field"><span class="field-label">Services Windows critiques (optionnel)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="W3SVC, WinRM" /></label>';
+        html += '<label class="field"><span class="field-label">Services Windows critiques (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="W3SVC, W32Time" /></label>';
       }
-    } else if (kind === "snmp_oid") {
-      html +=
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">IP cible</span><input type="text" id="pf-target" value="' + esc(preset.target || "") + '" placeholder="192.168.1.1" required /></label>' +
-          '<label class="field"><span class="field-label">Port UDP</span><input type="number" id="pf-port" value="' + esc(preset.port || 161) + '" /></label>' +
-          '<label class="field"><span class="field-label">Communauté</span><input type="text" id="pf-community" value="' + esc(preset.community || "public") + '" /></label>' +
-        "</div>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">OID SNMP</span><input type="text" id="pf-oid" class="mono" value="' + esc(preset.oid || "1.3.6.1.2.1.1.3.0") + '" required /></label>' +
-          '<label class="field"><span class="field-label">Valeur exacte (opt.)</span><input type="text" id="pf-equals" value="' + esc(preset.equals || "") + '" /></label>' +
-          '<label class="field"><span class="field-label">Contient (opt.)</span><input type="text" id="pf-contains" value="' + esc(preset.contains || "") + '" /></label>' +
-        "</div>";
     }
 
     fields.innerHTML = html;
+    $("pf-snmp-version")?.addEventListener("change", syncSNMPVersionFields);
+  }
+
+  function readSNMPFields(obj) {
+    obj.host = ($("pf-host")?.value || "").trim();
+    obj.port = Number($("pf-port")?.value) || 161;
+    obj.snmp_version = $("pf-snmp-version")?.value || "2c";
+    if (obj.snmp_version === "3") {
+      obj.user = ($("pf-snmp-user")?.value || "").trim();
+      obj.auth_proto = $("pf-auth-proto")?.value || "SHA256";
+      obj.auth_pass = $("pf-auth-pass")?.value || "";
+      obj.priv_proto = $("pf-priv-proto")?.value || "AES";
+      obj.priv_pass = $("pf-priv-pass")?.value || "";
+    } else {
+      obj.community = ($("pf-community")?.value || "public").trim();
+    }
   }
 
   function readProbeFormObject() {
@@ -1587,67 +1742,86 @@
     const obj = {
       id: ($("pf-id")?.value || "").trim(),
       kind,
-      interval_sec: Number($("pf-interval")?.value) || 30,
-      timeout_sec: Number($("pf-timeout")?.value) || 10,
-      insecure_skip_verify: Boolean($("pf-insecure")?.checked)
+      interval: ($("pf-interval")?.value || "").trim() || "1m",
+      timeout: ($("pf-timeout")?.value || "").trim() || "10s"
     };
 
     if (kind === "http") {
       obj.url = ($("pf-url")?.value || "").trim();
       obj.expected_status = Number($("pf-http-status")?.value) || 200;
-      obj.contains = ($("pf-contains")?.value || "").trim();
-      obj.tls_min_days = Number($("pf-tls-days")?.value) || 0;
+      const contains = ($("pf-contains")?.value || "").trim();
+      if (contains) obj.contains = contains;
+      const tlsRaw = ($("pf-tls-days")?.value || "").trim();
+      if (tlsRaw !== "") obj.tls_min_days = Number(tlsRaw);
+      obj.insecure_skip_verify = Boolean($("pf-insecure")?.checked);
     } else if (kind === "tcp") {
-      obj.address = ($("pf-address")?.value || "").trim();
+      const hostVal = ($("pf-host")?.value || "").trim();
+      const portVal = Number($("pf-port")?.value) || 22;
+      obj.host = hostVal;
+      obj.port = portVal;
+      obj.address = hostVal ? hostVal + ":" + portVal : "";
     } else if (kind === "docker") {
-      obj.docker_socket = ($("pf-docker-socket")?.value || "/var/run/docker.sock").trim();
+      obj.socket = ($("pf-socket")?.value || "/var/run/docker.sock").trim();
       obj.containers = splitCSV($("pf-containers")?.value);
+      const lbl = ($("pf-label")?.value || "").trim();
+      if (lbl) obj.label = lbl;
+      const mr = Number($("pf-max-restarts")?.value);
+      if (mr > 0) obj.max_restarts = mr;
     } else if (kind === "synology") {
-      obj.url = ($("pf-url")?.value || "").trim();
-      obj.username = ($("pf-username")?.value || "").trim();
-      obj.password = $("pf-password")?.value || "";
-      obj.max_temp_c = Number($("pf-max-temp")?.value) || 60;
-      obj.check_disks = Boolean($("pf-check-disks")?.checked);
-      obj.check_raid = Boolean($("pf-check-raid")?.checked);
+      readSNMPFields(obj);
+      obj.max_temp_c = Number($("pf-max-temp")?.value) || 55;
+    } else if (kind === "snmp_oid") {
+      readSNMPFields(obj);
+      obj.oid = ($("pf-oid")?.value || "").trim();
+      const ev = ($("pf-expected-value")?.value || "").trim();
+      if (ev) obj.expected_value = ev;
+      const minRaw = ($("pf-min-value")?.value || "").trim();
+      if (minRaw !== "" && !Number.isNaN(Number(minRaw))) obj.min_value = Number(minRaw);
+      const maxRaw = ($("pf-max-value")?.value || "").trim();
+      if (maxRaw !== "" && !Number.isNaN(Number(maxRaw))) obj.max_value = Number(maxRaw);
     } else if (kind === "proxmox") {
       obj.url = ($("pf-url")?.value || "").trim();
+      const node = ($("pf-node")?.value || "").trim();
+      if (node) obj.node = node;
+      obj.insecure_skip_verify = Boolean($("pf-insecure")?.checked);
       obj.token_id = ($("pf-token-id")?.value || "").trim();
       obj.token_secret = ($("pf-token-secret")?.value || "").trim();
-      obj.max_cpu_pct = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_ram_pct = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_pct = Number($("pf-max-disk")?.value) || 0;
+      obj.max_cpu_percent = Number($("pf-max-cpu")?.value) || 0;
+      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
+      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
       obj.vms = splitCSV($("pf-vms")?.value);
+      obj.disks = splitCSV($("pf-disks")?.value);
     } else if (kind === "windows_winrm") {
-      obj.url = ($("pf-url")?.value || "").trim();
-      obj.username = ($("pf-username")?.value || "").trim();
+      obj.host = ($("pf-host")?.value || "").trim();
+      obj.port = Number($("pf-port")?.value) || ($("pf-use-https")?.checked ? 5986 : 5985);
+      obj.use_https = Boolean($("pf-use-https")?.checked);
+      obj.insecure_skip_verify = Boolean($("pf-insecure")?.checked);
+      obj.domain = ($("pf-domain")?.value || "").trim();
+      obj.user = ($("pf-user")?.value || "").trim();
       obj.password = $("pf-password")?.value || "";
-      obj.max_cpu_pct = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_ram_pct = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_pct = Number($("pf-max-disk")?.value) || 0;
+      obj.max_cpu_percent = Number($("pf-max-cpu")?.value) || 0;
+      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
+      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
       obj.vms = splitCSV($("pf-vms")?.value);
       obj.services = splitCSV($("pf-services")?.value);
+      obj.disks = splitCSV($("pf-disks")?.value);
     } else if (kind === "linux_ssh") {
-      obj.address = ($("pf-address")?.value || "").trim();
-      obj.username = ($("pf-username")?.value || "").trim();
+      obj.host = ($("pf-host")?.value || "").trim();
+      obj.port = Number($("pf-port")?.value) || 22;
+      obj.user = ($("pf-user")?.value || "").trim();
       obj.password = $("pf-password")?.value || "";
-      obj.ssh_private_key = $("pf-ssh-key")?.value || "";
-      obj.max_cpu_pct = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_ram_pct = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_pct = Number($("pf-max-disk")?.value) || 0;
+      obj.ssh_key = $("pf-ssh-key")?.value || "";
+      obj.max_cpu_percent = Number($("pf-max-cpu")?.value) || 0;
+      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
+      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
       obj.services = splitCSV($("pf-services")?.value);
+      obj.disks = splitCSV($("pf-disks")?.value);
     } else if (kind === "node_exporter" || kind === "windows_exporter") {
       obj.url = ($("pf-url")?.value || "").trim();
-      obj.max_cpu_pct = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_mem_pct = Number($("pf-max-mem")?.value) || 0;
-      obj.max_disk_pct = Number($("pf-max-disk")?.value) || 0;
+      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
+      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
+      obj.disks = splitCSV($("pf-disks")?.value);
       if (kind === "windows_exporter") obj.services = splitCSV($("pf-services")?.value);
-    } else if (kind === "snmp_oid") {
-      obj.target = ($("pf-target")?.value || "").trim();
-      obj.port = Number($("pf-port")?.value) || 161;
-      obj.community = ($("pf-community")?.value || "public").trim();
-      obj.oid = ($("pf-oid")?.value || "").trim();
-      obj.equals = ($("pf-equals")?.value || "").trim();
-      obj.contains = ($("pf-contains")?.value || "").trim();
     }
     return obj;
   }
@@ -1693,9 +1867,7 @@
       showToast("Indiquez un nom de sonde.", "warn");
       return;
     }
-    if (!state.draft) state.draft = clone(state.config || {});
-    if (!state.draft.probes) state.draft.probes = [];
-
+    state.draft = ensureDraftShape(state.draft || state.config);
     if (state.editingIndex >= 0) {
       state.draft.probes[state.editingIndex] = probe;
     } else {
@@ -1703,22 +1875,21 @@
     }
     $("probe-modal").hidden = true;
     selectProbe(probe.id, false);
-    await saveConfiguration(false);
-    showToast("Sonde « " + probe.id + " » enregistrée.");
+    const saved = await saveConfiguration(false);
+    if (saved) showToast("Sonde « " + probe.id + " » enregistrée.");
   }
 
   /* -------------------- View 03: Friends & Invites + Peer Drawer -------------------- */
 
   function encodeInvite(cfg) {
-    if (!cfg || !cfg.private_key_hex || !cfg.group_psk_hex) return "";
-    const pub = state.status?.pubkey_hex || "";
+    const node = cfg?.node;
+    if (!node || !node.private_key_hex || !node.group_psk_hex) return "";
+    const pub = state.status?.pubkey_hex || node.pubkey_hex || "";
     if (!pub) return "";
     const payload = {
-      v: 1,
-      name: cfg.node_name || "MeshWatch",
-      pubkey_hex: pub,
-      group_psk_hex: cfg.group_psk_hex,
-      relays: cfg.relays || []
+      name: node.name || "MeshWatch",
+      pubkey: pub,
+      psk: node.group_psk_hex
     };
     const json = JSON.stringify(payload);
     const bytes = new TextEncoder().encode(json);
@@ -1729,6 +1900,10 @@
 
   function decodeInvite(raw) {
     const clean = String(raw || "").trim();
+    if (!clean) return null;
+    if (/^[0-9a-fA-F]{64}$/.test(clean)) {
+      return { name: "", pubkey_hex: clean.toLowerCase(), group_psk_hex: "" };
+    }
     if (!clean.startsWith("MW1-")) return null;
     try {
       let b64 = clean.slice(4).replace(/-/g, "+").replace(/_/g, "/");
@@ -1736,14 +1911,13 @@
       const bin = atob(b64);
       const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
       const obj = JSON.parse(new TextDecoder().decode(bytes));
-      const pub = obj.pubkey_hex || obj.pubkey || obj.pk || "";
-      const psk = obj.group_psk_hex || obj.psk || "";
-      if (!pub || pub.length < 32) return null;
+      const pub = obj.pubkey || obj.pubkey_hex || obj.pk || "";
+      const psk = obj.psk || obj.group_psk_hex || "";
+      if (!/^[0-9a-fA-F]{64}$/.test(pub)) return null;
       return {
-        name: obj.name || "Ami MeshWatch",
-        pubkey_hex: pub,
-        group_psk_hex: psk,
-        relays: Array.isArray(obj.relays) ? obj.relays : []
+        name: String(obj.name || "Ami MeshWatch").trim() || "Ami MeshWatch",
+        pubkey_hex: pub.toLowerCase(),
+        group_psk_hex: /^[0-9a-fA-F]{64}$/.test(psk) ? psk.toLowerCase() : ""
       };
     } catch {
       return null;
@@ -1819,7 +1993,7 @@
         "<dt>Statut</dt><dd>" + (peer.timed_out ? "Hors ligne (timeout)" : peer.online ? (peer.overall_ok ? "Opérationnel" : "Alerte détectée") : "En attente du 1er signal") + "</dd>" +
         "<dt>Dernier battement</dt><dd>" + esc(fmtAge(peer.last_seen)) + "</dd>" +
         "<dt>Uptime nœud</dt><dd>" + esc(fmtUptime(peer.uptime_sec)) + "</dd>" +
-        "<dt>Clé Nostr</dt><dd class=\"mono\">" + esc(pubkeyHex) + "</dd>" +
+        '<dt>Clé Nostr</dt><dd class="mono">' + esc(pubkeyHex) + "</dd>" +
       "</dl></div>";
 
     const probes = peer.probes || [];
@@ -1845,90 +2019,143 @@
     $("peer-drawer").hidden = true;
   }
 
-  /* -------------------- Forms Sync (Alerts & Settings) -------------------- */
+  /* -------------------- Forms Sync (Alerts & Settings -> ConfigDTO) -------------------- */
+
+  function inferPhotonMode(ph) {
+    if (!ph) return "cloud";
+    const m = String(ph.mode || "").toLowerCase().trim();
+    if (m === "cloud" || m === "spectrum") return "cloud";
+    if (m === "proxy" || m === "custom") return m;
+    if (ph.project_id || String(ph.api_key || "").startsWith("pho_")) return "cloud";
+    if (ph.server_url || String(ph.url || "").includes("imessage-swagger.photon.codes")) return "proxy";
+    if (ph.url && ph.recipient) return "custom";
+    return "cloud";
+  }
 
   function syncPhotonFieldsVisibility() {
     const mode = $("photon-mode")?.value || "cloud";
-    if ($("photon-server-field")) $("photon-server-field").hidden = mode === "cloud";
-    if ($("photon-cloud-fields")) $("photon-cloud-fields").hidden = mode === "proxy";
-    if ($("photon-apikey-field")) $("photon-apikey-field").hidden = false;
+    if ($("photon-mode-cloud")) $("photon-mode-cloud").hidden = mode !== "cloud";
+    if ($("photon-mode-proxy")) $("photon-mode-proxy").hidden = mode !== "proxy";
+    if ($("photon-mode-custom")) $("photon-mode-custom").hidden = mode !== "custom";
   }
 
   function renderConfigForms() {
-    const cfg = state.draft;
-    if (!cfg) return;
+    const cfg = ensureDraftShape(state.draft);
+    state.draft = cfg;
 
-    const ntfy = cfg.notifications?.ntfy || {};
+    const ntfy = cfg.notifications.ntfy || {};
     if ($("ntfy-enabled")) $("ntfy-enabled").checked = Boolean(ntfy.enabled);
-    if ($("ntfy-url")) $("ntfy-url").value = ntfy.url || "https://ntfy.sh";
+    if ($("ntfy-url")) $("ntfy-url").value = ntfy.url || "";
     if ($("ntfy-topic")) $("ntfy-topic").value = ntfy.topic || "";
     if ($("ntfy-token")) $("ntfy-token").value = ntfy.token || "";
-    if ($("ntfy-priority")) $("ntfy-priority").value = ntfy.priority || 4;
-    if ($("ntfy-tags")) $("ntfy-tags").value = ntfy.tags || "rotating_light";
 
-    const ph = cfg.notifications?.photon || {};
+    const ph = cfg.notifications.photon_imessage || {};
     if ($("photon-enabled")) $("photon-enabled").checked = Boolean(ph.enabled);
-    let pMode = "cloud";
-    if (ph.server_url && ph.project_id) pMode = "custom";
-    else if (ph.server_url) pMode = "proxy";
+    const pMode = inferPhotonMode(ph);
     if ($("photon-mode")) $("photon-mode").value = pMode;
-    if ($("photon-server-url")) $("photon-server-url").value = ph.server_url || "";
-    if ($("photon-project-id")) $("photon-project-id").value = ph.project_id || "";
-    if ($("photon-project-secret")) $("photon-project-secret").value = ph.project_secret || "";
-    if ($("photon-api-key")) $("photon-api-key").value = ph.api_key || "";
-    if ($("photon-to-number")) $("photon-to-number").value = ph.to_number || "";
-    if ($("photon-mac-url")) $("photon-mac-url").value = ph.mac_agent_url || "";
     syncPhotonFieldsVisibility();
 
-    const al = cfg.alerts || {};
-    if ($("alerts-down-threshold")) $("alerts-down-threshold").value = al.down_threshold || 2;
-    if ($("alerts-recover-threshold")) $("alerts-recover-threshold").value = al.recover_threshold || 1;
+    if ($("photon-project-id")) $("photon-project-id").value = ph.project_id || "";
+    if ($("photon-api-key")) $("photon-api-key").value = ph.api_key || (pMode === "cloud" ? ph.token || "" : "");
+    if ($("photon-recipient")) $("photon-recipient").value = ph.recipient || "";
+    if ($("photon-cloud-url")) $("photon-cloud-url").value = pMode === "cloud" ? (ph.url || "") : "";
+    if ($("photon-sender-id")) $("photon-sender-id").value = ph.sender_id || "";
+    if ($("photon-space-id")) $("photon-space-id").value = ph.space_id || "";
 
-    if ($("set-node-name")) $("set-node-name").value = cfg.node_name || "";
-    if ($("set-pubkey")) $("set-pubkey").value = state.status?.pubkey_hex || "";
-    if ($("set-group-psk")) $("set-group-psk").value = cfg.group_psk_hex || "";
-    if ($("set-automute-urls")) $("set-automute-urls").value = (cfg.auto_mute_urls || []).join("\n");
-    if ($("set-hb-sec")) $("set-hb-sec").value = cfg.heartbeat_interval_sec || 15;
-    if ($("set-peer-timeout")) $("set-peer-timeout").value = cfg.peer_timeout_sec || 60;
-    if ($("set-relays")) $("set-relays").value = (cfg.relays || []).join("\n");
+    if ($("photon-server-url")) $("photon-server-url").value = ph.server_url || "";
+    if ($("photon-proxy-key")) $("photon-proxy-key").value = pMode === "proxy" ? (ph.api_key || "") : "";
+    if ($("photon-proxy-recipient")) $("photon-proxy-recipient").value = ph.recipient || "";
+    if ($("photon-proxy-url")) $("photon-proxy-url").value = pMode === "proxy" ? (ph.url || "https://imessage-swagger.photon.codes") : "https://imessage-swagger.photon.codes";
+    if ($("photon-proxy-token")) $("photon-proxy-token").value = pMode === "proxy" ? (ph.token || "") : "";
+
+    if ($("photon-custom-url")) $("photon-custom-url").value = pMode === "custom" ? (ph.url || "") : "";
+    if ($("photon-custom-recipient")) $("photon-custom-recipient").value = ph.recipient || "";
+    if ($("photon-custom-token")) $("photon-custom-token").value = pMode === "custom" ? (ph.token || "") : "";
+    if ($("photon-rec-field")) $("photon-rec-field").value = ph.recipient_field || "recipient";
+    if ($("photon-msg-field")) $("photon-msg-field").value = ph.message_field || "message";
+
+    const node = cfg.node || {};
+    if ($("set-node-name")) $("set-node-name").value = node.name || "";
+    if ($("set-pubkey")) $("set-pubkey").value = state.status?.pubkey_hex || node.pubkey_hex || "";
+    if ($("set-privkey")) $("set-privkey").value = node.private_key_hex || "";
+    if ($("set-group-psk")) $("set-group-psk").value = node.group_psk_hex || "";
+    if ($("set-hb-interval")) $("set-hb-interval").value = node.heartbeat_interval || "30s";
+    if ($("set-peer-timeout")) $("set-peer-timeout").value = node.peer_timeout || "1m30s";
+
+    if ($("set-relays")) $("set-relays").value = (cfg.nostr?.relays || []).join("\n");
+    if ($("set-automute-targets")) $("set-automute-targets").value = (cfg.auto_mute?.targets || []).join("\n");
+    if ($("set-automute-timeout")) $("set-automute-timeout").value = cfg.auto_mute?.timeout || "3s";
+
     if ($("raw-yaml-editor")) $("raw-yaml-editor").value = state.rawYAML || "";
     if ($("settings-config-path")) $("settings-config-path").textContent = state.status?.config_path || "config.yaml";
   }
 
-  function pullConfigFormsIntoDraft() {
-    if (!state.draft) return;
-    if (!state.draft.notifications) state.draft.notifications = {};
-    if (!state.draft.notifications.ntfy) state.draft.notifications.ntfy = {};
-    if (!state.draft.notifications.photon) state.draft.notifications.photon = {};
-    if (!state.draft.alerts) state.draft.alerts = {};
-
-    const ntfy = state.draft.notifications.ntfy;
-    if ($("ntfy-enabled")) ntfy.enabled = $("ntfy-enabled").checked;
-    if ($("ntfy-url")) ntfy.url = $("ntfy-url").value.trim();
-    if ($("ntfy-topic")) ntfy.topic = $("ntfy-topic").value.trim();
-    if ($("ntfy-token")) ntfy.token = $("ntfy-token").value.trim();
-    if ($("ntfy-priority")) ntfy.priority = Number($("ntfy-priority").value) || 4;
-    if ($("ntfy-tags")) ntfy.tags = $("ntfy-tags").value.trim();
-
-    const ph = state.draft.notifications.photon;
+  function readPhotonDTO() {
     const mode = $("photon-mode")?.value || "cloud";
-    if ($("photon-enabled")) ph.enabled = $("photon-enabled").checked;
-    ph.server_url = mode === "cloud" ? "" : ($("photon-server-url")?.value || "").trim();
-    ph.project_id = mode === "proxy" ? "" : ($("photon-project-id")?.value || "").trim();
-    ph.project_secret = mode === "proxy" ? "" : ($("photon-project-secret")?.value || "").trim();
-    ph.api_key = ($("photon-api-key")?.value || "").trim();
-    ph.to_number = ($("photon-to-number")?.value || "").trim();
-    ph.mac_agent_url = ($("photon-mac-url")?.value || "").trim();
+    const enabled = Boolean($("photon-enabled")?.checked);
+    if (mode === "cloud") {
+      return {
+        enabled,
+        mode: "cloud",
+        url: ($("photon-cloud-url")?.value || "").trim(),
+        project_id: ($("photon-project-id")?.value || "").trim(),
+        api_key: ($("photon-api-key")?.value || "").trim(),
+        recipient: ($("photon-recipient")?.value || "").trim(),
+        sender_id: ($("photon-sender-id")?.value || "").trim(),
+        space_id: ($("photon-space-id")?.value || "").trim()
+      };
+    }
+    if (mode === "proxy") {
+      return {
+        enabled,
+        mode: "proxy",
+        url: ($("photon-proxy-url")?.value || "").trim() || "https://imessage-swagger.photon.codes",
+        server_url: ($("photon-server-url")?.value || "").trim(),
+        api_key: ($("photon-proxy-key")?.value || "").trim(),
+        token: ($("photon-proxy-token")?.value || "").trim(),
+        recipient: ($("photon-proxy-recipient")?.value || "").trim()
+      };
+    }
+    return {
+      enabled,
+      mode: "custom",
+      url: ($("photon-custom-url")?.value || "").trim(),
+      recipient: ($("photon-custom-recipient")?.value || "").trim(),
+      token: ($("photon-custom-token")?.value || "").trim(),
+      recipient_field: ($("photon-rec-field")?.value || "").trim() || "recipient",
+      message_field: ($("photon-msg-field")?.value || "").trim() || "message"
+    };
+  }
 
-    if ($("alerts-down-threshold")) state.draft.alerts.down_threshold = Number($("alerts-down-threshold").value) || 2;
-    if ($("alerts-recover-threshold")) state.draft.alerts.recover_threshold = Number($("alerts-recover-threshold").value) || 1;
+  function pullConfigFormsIntoDraft() {
+    state.draft = ensureDraftShape(state.draft);
+    const d = state.draft;
 
-    if ($("set-node-name")) state.draft.node_name = $("set-node-name").value.trim();
-    if ($("set-group-psk")) state.draft.group_psk_hex = $("set-group-psk").value.trim();
-    if ($("set-automute-urls")) state.draft.auto_mute_urls = splitLines($("set-automute-urls").value);
-    if ($("set-hb-sec")) state.draft.heartbeat_interval_sec = Number($("set-hb-sec").value) || 15;
-    if ($("set-peer-timeout")) state.draft.peer_timeout_sec = Number($("set-peer-timeout").value) || 60;
-    if ($("set-relays")) state.draft.relays = splitLines($("set-relays").value);
+    if ($("set-node-name")) d.node.name = $("set-node-name").value.trim() || "mon-homelab";
+    if ($("set-privkey")) {
+      const pk = $("set-privkey").value.trim();
+      if (pk) d.node.private_key_hex = pk;
+    }
+    if ($("set-group-psk")) {
+      const psk = $("set-group-psk").value.trim();
+      if (psk) d.node.group_psk_hex = psk;
+    }
+    if ($("set-hb-interval")) d.node.heartbeat_interval = $("set-hb-interval").value.trim() || "30s";
+    if ($("set-peer-timeout")) d.node.peer_timeout = $("set-peer-timeout").value.trim() || "1m30s";
+
+    if ($("set-relays")) d.nostr.relays = splitLines($("set-relays").value);
+    if ($("set-automute-targets")) d.auto_mute.targets = splitLines($("set-automute-targets").value);
+    if ($("set-automute-timeout")) d.auto_mute.timeout = $("set-automute-timeout").value.trim() || "3s";
+
+    d.notifications = {
+      ntfy: {
+        enabled: Boolean($("ntfy-enabled")?.checked),
+        url: ($("ntfy-url")?.value || "").trim(),
+        topic: ($("ntfy-topic")?.value || "").trim(),
+        token: ($("ntfy-token")?.value || "").trim()
+      },
+      photon_imessage: readPhotonDTO()
+    };
   }
 
   async function runTestNotify() {
@@ -1943,18 +2170,21 @@
       const res = await apiFetch("/api/test-notify", {
         method: "POST",
         body: JSON.stringify({
-          node_name: state.draft.node_name || "MeshWatch",
+          node_name: state.draft.node?.name || "MeshWatch",
           notifications: state.draft.notifications
         })
       });
       const lines = res.results || [];
       if (banner) {
-        banner.innerHTML = lines.map((l) => (
-          '<div class="test-output-line">' +
-            '<span><strong>' + esc(l.channel) + "</strong> — " + esc(l.message) + "</span>" +
-            '<span class="badge ' + (l.ok ? "ok" : "danger") + '">' + (l.ok ? "ENVOYÉ" : "ÉCHEC") + "</span>" +
-          "</div>"
-        )).join("") || "Aucun canal actif configuré.";
+        banner.innerHTML = lines.map((l) => {
+          const detail = l.error || (l.ok ? "Envoyé (" + (l.latency_ms || 0) + " ms)" : "Échec");
+          return (
+            '<div class="test-output-line">' +
+              "<span><strong>" + esc(l.channel) + "</strong> — " + esc(detail) + "</span>" +
+              '<span class="badge ' + (l.ok ? "ok" : "danger") + '">' + (l.ok ? "ENVOYÉ" : "ÉCHEC") + "</span>" +
+            "</div>"
+          );
+        }).join("") || "Aucun canal actif configuré.";
       }
     } catch (e) {
       if (banner) banner.innerHTML = '<span style="color:var(--danger)">Erreur : ' + esc(e.message) + "</span>";
@@ -2011,7 +2241,7 @@
     try {
       await apiFetch("/api/update/apply", {
         method: "POST",
-        body: JSON.stringify({ image: state.updateInfo?.docker_image || "" })
+        body: JSON.stringify({ image: state.updateInfo?.image || state.updateInfo?.docker_image || "" })
       });
       if ($("updating-progress")) $("updating-progress").style.width = "65%";
       if ($("updating-phase-sub")) $("updating-phase-sub").textContent = "Redémarrage du conteneur…";
@@ -2047,12 +2277,15 @@
     triggerLEDBusy("wave", "Génération des clés", "AES-256-GCM", 2500);
     try {
       const keys = await apiFetch("/api/keygen", { method: "POST", body: "{}" });
-      if (!state.draft) state.draft = clone(state.config || {});
-      state.draft.node_name = name;
-      state.draft.private_key_hex = keys.private_key_hex;
-      state.draft.group_psk_hex = keys.group_psk_hex;
-      await saveConfiguration(false);
-      showToast("Nœud « " + name + " » initialisé !");
+      state.draft = ensureDraftShape(state.draft || state.config);
+      state.draft.node.name = name;
+      state.draft.node.private_key_hex = keys.private_key_hex;
+      state.draft.node.group_psk_hex = keys.group_psk_hex;
+      if ($("set-node-name")) $("set-node-name").value = name;
+      if ($("set-privkey")) $("set-privkey").value = keys.private_key_hex;
+      if ($("set-group-psk")) $("set-group-psk").value = keys.group_psk_hex;
+      const saved = await saveConfiguration(false);
+      if (saved) showToast("Nœud « " + name + " » initialisé !");
     } catch (e) {
       showToast("Erreur initialisation : " + e.message, "err");
     }
@@ -2078,7 +2311,7 @@
         method: "PUT",
         body: JSON.stringify({ yaml: text })
       });
-      state.config = res.config || {};
+      state.config = ensureDraftShape(res.config);
       state.draft = clone(state.config);
       state.rawYAML = res.yaml || text;
       state.dirty = false;
@@ -2215,7 +2448,6 @@
     $("settings-check-update-btn")?.addEventListener("click", () => checkUpdates(true));
     $("settings-apply-update-btn")?.addEventListener("click", triggerUpdate);
 
-    // Fleet controls
     $("fleet-seg")?.querySelectorAll("button[data-filter]").forEach((btn) => {
       btn.addEventListener("click", () => {
         state.fleetFilter = btn.dataset.filter;
@@ -2232,7 +2464,6 @@
       if (state.status) renderFleetTable(state.status);
     });
 
-    // Inspector tabs & actions
     document.querySelectorAll(".tab[data-insp-tab]").forEach((btn) => {
       btn.addEventListener("click", () => {
         state.inspectorTab = btn.dataset.inspTab;
@@ -2244,14 +2475,12 @@
     $("insp-edit-btn")?.addEventListener("click", () => state.selectedProbeID && editProbeByID(state.selectedProbeID));
     $("insp-del-btn")?.addEventListener("click", () => state.selectedProbeID && deleteProbeByID(state.selectedProbeID));
 
-    // Discover
     $("docker-scan-btn")?.addEventListener("click", () => runDockerScan(false));
     $("docker-apply-btn")?.addEventListener("click", applyDockerSelection);
     $("lan-scan-btn")?.addEventListener("click", runLANScan);
     $("lan-category-filter")?.addEventListener("change", renderLANItems);
     $("managed-filter-input")?.addEventListener("input", renderManagedProbes);
 
-    // Probe Modal
     $("probe-modal-close")?.addEventListener("click", () => { $("probe-modal").hidden = true; });
     $("probe-back-kind-btn")?.addEventListener("click", () => {
       $("probe-step-kind").hidden = false;
@@ -2263,7 +2492,6 @@
     $("probe-test-modal-btn")?.addEventListener("click", runModalProbeTest);
     $("probe-form")?.addEventListener("submit", submitProbeModal);
 
-    // Friends & Peer Drawer
     $("copy-invite-btn")?.addEventListener("click", async () => {
       const val = $("my-invite-code")?.value || "";
       if (!val.startsWith("MW1-")) { showToast("Initialisez le nœud d'abord.", "warn"); return; }
@@ -2277,26 +2505,23 @@
       if (!pv) return;
       if (!dec) { pv.hidden = true; return; }
       pv.hidden = false;
-      pv.textContent = "Ami détecté : " + dec.name + " · Clé " + dec.pubkey_hex.slice(0, 14) + "… · " + dec.relays.length + " relais";
+      pv.textContent = "Ami détecté : " + dec.name + " · Clé " + dec.pubkey_hex.slice(0, 14) + "…";
     });
     $("accept-invite-btn")?.addEventListener("click", async () => {
       const dec = decodeInvite($("accept-invite-input")?.value);
-      if (!dec) { showToast("Code MW1 invalide.", "err"); return; }
-      if (!state.draft) state.draft = clone(state.config || {});
-      if (!state.draft.peers) state.draft.peers = [];
-      if (!state.draft.peers.some((p) => p.pubkey_hex === dec.pubkey_hex)) {
-        state.draft.peers.push({ name: dec.name, pubkey_hex: dec.pubkey_hex });
+      if (!dec) { showToast("Code MW1 ou clé hex invalide.", "err"); return; }
+      state.draft = ensureDraftShape(state.draft || state.config);
+      if (!state.draft.peers.some((p) => (p.pubkey_hex || "").toLowerCase() === dec.pubkey_hex)) {
+        state.draft.peers.push({ name: dec.name || "Ami " + (state.draft.peers.length + 1), pubkey_hex: dec.pubkey_hex });
       }
-      if (dec.group_psk_hex && !state.draft.group_psk_hex) {
-        state.draft.group_psk_hex = dec.group_psk_hex;
-      }
-      if (dec.relays.length && (!state.draft.relays || !state.draft.relays.length)) {
-        state.draft.relays = dec.relays;
+      if (dec.group_psk_hex && (!state.draft.node.group_psk_hex || state.draft.peers.length <= 1)) {
+        state.draft.node.group_psk_hex = dec.group_psk_hex;
+        if ($("set-group-psk")) $("set-group-psk").value = dec.group_psk_hex;
       }
       $("accept-invite-input").value = "";
       $("accept-invite-preview").hidden = true;
-      await saveConfiguration(false);
-      showToast("Ami « " + dec.name + " » ajouté !");
+      const saved = await saveConfiguration(false);
+      if (saved) showToast("Ami « " + (dec.name || "Pair") + " » ajouté !");
     });
     $("friends-manual-btn")?.addEventListener("click", () => { $("friend-modal").hidden = false; });
     $("friend-modal-close")?.addEventListener("click", () => { $("friend-modal").hidden = true; });
@@ -2304,17 +2529,16 @@
     $("friend-modal-save")?.addEventListener("click", async () => {
       const name = ($("fm-name")?.value || "").trim() || "Ami";
       const pk = ($("fm-pubkey")?.value || "").trim();
-      if (pk.length < 32) { showToast("Clé publique invalide.", "err"); return; }
-      if (!state.draft.peers) state.draft.peers = [];
-      state.draft.peers.push({ name, pubkey_hex: pk });
+      if (!/^[0-9a-fA-F]{64}$/.test(pk)) { showToast("Clé publique invalide (64 hex).", "err"); return; }
+      state.draft = ensureDraftShape(state.draft || state.config);
+      state.draft.peers.push({ name, pubkey_hex: pk.toLowerCase() });
       $("friend-modal").hidden = true;
-      await saveConfiguration(false);
-      showToast("Ami ajouté !");
+      const saved = await saveConfiguration(false);
+      if (saved) showToast("Ami ajouté !");
     });
     $("peer-drawer-backdrop")?.addEventListener("click", closePeerDrawer);
     $("peer-drawer-close")?.addEventListener("click", closePeerDrawer);
 
-    // Alerts & Settings
     $("alerts-save-btn")?.addEventListener("click", () => saveConfiguration(true));
     $("settings-save-btn")?.addEventListener("click", () => saveConfiguration(true));
     $("alerts-test-btn")?.addEventListener("click", runTestNotify);
@@ -2330,8 +2554,10 @@
     });
     $("regen-keys-btn")?.addEventListener("click", async () => {
       const keys = await apiFetch("/api/keygen", { method: "POST", body: "{}" });
-      state.draft.private_key_hex = keys.private_key_hex;
-      state.draft.group_psk_hex = keys.group_psk_hex;
+      state.draft = ensureDraftShape(state.draft || state.config);
+      state.draft.node.private_key_hex = keys.private_key_hex;
+      state.draft.node.group_psk_hex = keys.group_psk_hex;
+      if ($("set-privkey")) $("set-privkey").value = keys.private_key_hex;
       if ($("set-group-psk")) $("set-group-psk").value = keys.group_psk_hex;
       markDirty();
       showToast("Nouvelles clés générées — cliquez sur Enregistrer.", "warn");
@@ -2347,7 +2573,7 @@
     $("raw-yaml-save-btn")?.addEventListener("click", async () => {
       try {
         const res = await apiFetch("/api/config", { method: "PUT", body: JSON.stringify({ yaml: $("raw-yaml-editor").value }) });
-        state.config = res.config || {};
+        state.config = ensureDraftShape(res.config);
         state.draft = clone(state.config);
         state.rawYAML = res.yaml || "";
         state.dirty = false;
@@ -2360,7 +2586,6 @@
       }
     });
 
-    // Toggle secret fields
     document.querySelectorAll("[data-toggle-secret]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const inp = $(btn.dataset.toggleSecret);
@@ -2371,7 +2596,6 @@
       });
     });
 
-    // Dirty tracking for form inputs inside Alerts & Settings
     ["#view-alerts input, #view-alerts select, #view-settings input, #view-settings textarea"].forEach((sel) => {
       document.querySelectorAll(sel).forEach((el) => {
         if (el.type === "file" || el.readOnly) return;
@@ -2386,7 +2610,6 @@
       syncUnsavedBar();
     });
 
-    // Command Palette & Shortcuts
     $("cmd-palette-btn")?.addEventListener("click", openPalette);
     $("cmd-palette")?.addEventListener("click", (e) => { if (e.target === $("cmd-palette")) closePalette(); });
     $("palette-input")?.addEventListener("input", (e) => renderPaletteList(e.target.value));
@@ -2461,7 +2684,6 @@
     });
   }
 
-  // Expose runDockerScan explicitly on window as referenced by tests & inline triggers
   window.runDockerScan = runDockerScan;
 
   document.addEventListener("DOMContentLoaded", bootstrap);
