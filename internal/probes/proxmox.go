@@ -194,6 +194,22 @@ func evaluateProxmoxResources(
 		}
 	}
 
+	if len(nodes) > 0 && len(storages) == 0 && len(guests) == 0 {
+		anyOffline := false
+		anyMetrics := false
+		for _, n := range nodes {
+			if !strings.EqualFold(strings.TrimSpace(n.Status), "online") {
+				anyOffline = true
+			}
+			if n.MaxCPU > 0 || n.MaxMem > 0 || n.MaxDisk > 0 {
+				anyMetrics = true
+			}
+		}
+		if !anyOffline && !anyMetrics {
+			return false, "Proxmox API connectée, mais ce jeton n'a aucune permission de lecture (CPU/RAM/VM masqués) — dans Proxmox : Centre de données → Permissions → Ajouter → Permission de jeton d'API (Chemin « / », Rôle « PVEAuditor »), ou décochez « Séparation des privilèges »"
+		}
+	}
+
 	sort.Slice(nodes, func(i, j int) bool {
 		return strings.ToLower(nodes[i].Node) < strings.ToLower(nodes[j].Node)
 	})
@@ -229,7 +245,7 @@ func evaluateProxmoxResources(
 			issues = append(issues, fmt.Sprintf("Node %s %s", name, fallbackStr(n.Status, "unknown")))
 		}
 
-		if st == "online" || n.MaxCPU > 0 {
+		if n.MaxCPU > 0 {
 			cpuPct := n.CPU * 100.0
 			if cpuPct < 0 {
 				cpuPct = 0

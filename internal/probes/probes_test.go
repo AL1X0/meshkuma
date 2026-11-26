@@ -593,6 +593,8 @@ func TestProxmoxProbe(t *testing.T) {
 				_, _ = w.Write([]byte(`{"data":[]}`))
 			case "PVEAPIToken=root@pam!nodesonly=fb":
 				_, _ = w.Write([]byte(`{"data":[]}`))
+			case "PVEAPIToken=root@pam!noperm=stub":
+				_, _ = w.Write([]byte(`{"data":[{"type":"node","node":"pve","status":"online"}]}`))
 			case "PVEAPIToken=root@pam!fail=cases":
 				_, _ = w.Write([]byte(`{
   "data": [
@@ -725,5 +727,19 @@ func TestProxmoxProbe(t *testing.T) {
 	res = pEmpty.Check(context.Background())
 	if res.OK || !strings.Contains(res.Summary, "Privilege Separation") || !strings.Contains(res.Summary, "PVEAuditor") {
 		t.Fatalf("expected Privilege Separation guidance, got %+v", res)
+	}
+
+	// 4d. Unprivileged token stub (Privilege Separation without ACL role: only {"type":"node","status":"online"})
+	pStub := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-stub",
+		URL:                srv.URL,
+		TokenID:            "root@pam!noperm",
+		TokenSecret:        "stub",
+		InsecureSkipVerify: true,
+		VMs:                []string{"100", "101"},
+	})
+	res = pStub.Check(context.Background())
+	if res.OK || !strings.Contains(res.Summary, "PVEAuditor") || !strings.Contains(res.Summary, "Séparation des privilèges") {
+		t.Fatalf("expected unprivileged token guidance, got %+v", res)
 	}
 }

@@ -1474,7 +1474,7 @@
           p.insecure_skip_verify = true;
         }
         simpleHTML =
-          '<div class="help-callout">Dans Proxmox VE : ouvrez <strong>Datacenter → Permissions → API Tokens → Add</strong>, créez un jeton (ex. <span class="mono-inline">root@pam</span> + ID <span class="mono-inline">meshwatch</span>), décochez <strong>Privilege Separation</strong> <em>(ou accordez le rôle <span class="mono-inline">PVEAuditor</span> sur <span class="mono-inline">/</span>)</em>. Collez les deux valeurs ci-dessous.</div>' +
+          '<div class="help-callout">Dans Proxmox VE : ouvrez <strong>Centre de données → Permissions → Jetons d\'API → Ajouter</strong> (ex. <span class="mono-inline">root@pam</span> + ID <span class="mono-inline">meshwatch</span>). Décochez <strong>Séparation des privilèges</strong>, ou accordez au jeton le rôle <span class="mono-inline">PVEAuditor</span> sur <span class="mono-inline">/</span> dans <strong>Permissions → Ajouter → Permission de jeton d\'API</strong>.</div>' +
           '<label class="field"><span class="field-label">Adresse IP ou URL Proxmox</span>' +
           '<input type="text" class="mono" id="mp-proxmox-host" value="' + escapeHTML(hostVal) + '" placeholder="192.168.1.30 ou https://pve.local:8006" required></label>' +
           '<label class="field"><span class="field-label">Token ID Proxmox</span>' +
