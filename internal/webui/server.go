@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -759,11 +760,19 @@ func (s *Server) handleDiscoverLAN(w http.ResponseWriter, r *http.Request) {
 		for _, p := range cfg.Probes {
 			if p.URL != "" {
 				existingTargets[strings.TrimRight(strings.ToLower(p.URL), "/")] = true
+				if p.Kind == "proxmox" {
+					if u, err := url.Parse(strings.TrimSpace(p.URL)); err == nil && u.Hostname() != "" {
+						existingTargets["proxmox:"+strings.ToLower(u.Hostname())] = true
+					}
+				}
 			}
 			if p.Host != "" {
 				existingTargets[fmt.Sprintf("%s:%s:%d", p.Kind, strings.ToLower(p.Host), p.Port)] = true
 				if p.Kind == "synology" {
 					existingTargets["synology:"+strings.ToLower(p.Host)] = true
+				}
+				if p.Kind == "proxmox" {
+					existingTargets["proxmox:"+strings.ToLower(p.Host)] = true
 				}
 			}
 		}
@@ -781,6 +790,9 @@ func (s *Server) handleDiscoverLAN(w http.ResponseWriter, r *http.Request) {
 			dup = true
 		}
 		if sp.Kind == "synology" && existingTargets["synology:"+strings.ToLower(sp.Host)] {
+			dup = true
+		}
+		if sp.Kind == "proxmox" && (existingTargets["proxmox:"+strings.ToLower(item.IP)] || (item.Hostname != "" && existingTargets["proxmox:"+strings.ToLower(item.Hostname)])) {
 			dup = true
 		}
 		if sp.Host != "" && existingTargets[fmt.Sprintf("%s:%s:%d", sp.Kind, strings.ToLower(sp.Host), sp.Port)] {

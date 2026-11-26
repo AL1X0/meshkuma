@@ -111,6 +111,8 @@ func BuildFromConfig(cfgs []config.ProbeConfig) ([]ScheduledProbe, error) {
 			p = NewNodeExporterProbe(pc)
 		case "windows_exporter":
 			p = NewWindowsExporterProbe(pc)
+		case "proxmox":
+			p = NewProxmoxProbe(pc)
 		default:
 			return nil, fmt.Errorf("probe %q: unsupported kind %q", pc.ID, pc.Kind)
 		}

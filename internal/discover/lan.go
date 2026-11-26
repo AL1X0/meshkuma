@@ -32,6 +32,7 @@ type SuggestedProbe struct {
 	SNMPVersion        string   `json:"snmp_version,omitempty"`
 	Community          string   `json:"community,omitempty"`
 	MaxTempC           int      `json:"max_temp_c,omitempty"`
+	MaxCPUPercent      float64  `json:"max_cpu_percent,omitempty"`
 	MaxDiskPercent     float64  `json:"max_disk_percent,omitempty"`
 	MaxRAMPercent      float64  `json:"max_ram_percent,omitempty"`
 	Services           []string `json:"services,omitempty"`
@@ -390,6 +391,40 @@ func classifyHost(ctx context.Context, client *http.Client, ip string, openPorts
 		hasSpecific = true
 	}
 
+	// 1b. Proxmox VE API detection (port 8006)
+	if portSet[8006] {
+		title := fetchHTMLTitle(ctx, client, fmt.Sprintf("https://%s:8006", ip))
+		name := "Proxmox VE"
+		if title != "" && strings.Contains(strings.ToLower(title), "proxmox") {
+			name = cleanTitle(title)
+		} else if hostname != "" {
+			name = "Proxmox VE (" + hostname + ")"
+		}
+		out = append(out, DiscoveredItem{
+			Key:           fmt.Sprintf("proxmox:%s", ip),
+			IP:            ip,
+			Hostname:      hostname,
+			Name:          name,
+			Category:      "proxmox",
+			CategoryLabel: "Hyperviseur Proxmox VE",
+			Summary:       fmt.Sprintf("Proxmox VE détecté sur %s:8006. Surveillance via API (nœuds, CPU, RAM, stockages et VM/LXC).", ip),
+			Port:          8006,
+			OpenPorts:     openPorts,
+			SuggestedProbe: SuggestedProbe{
+				ID:                 makeProbeID("proxmox", hostname, ip),
+				Kind:               "proxmox",
+				Interval:           "60s",
+				Timeout:            "10s",
+				URL:                fmt.Sprintf("https://%s:8006", ip),
+				InsecureSkipVerify: true,
+				MaxCPUPercent:      90,
+				MaxRAMPercent:      90,
+				MaxDiskPercent:     90,
+			},
+		})
+		hasSpecific = true
+	}
+
 	// 2. Linux node_exporter (port 9100)
 	if portSet[9100] {
 		metricsURL := fmt.Sprintf("http://%s:9100/metrics", ip)
@@ -455,7 +490,7 @@ func classifyHost(ctx context.Context, client *http.Client, ip string, openPorts
 	}
 
 	// 4. Web applications / dashboards on open HTTP/HTTPS ports
-	skipWeb := map[int]bool{5000: true, 5001: true, 9100: true, 9182: true, 22: true, 3389: true}
+	skipWeb := map[int]bool{5000: true, 5001: true, 8006: true, 9100: true, 9182: true, 22: true, 3389: true}
 	for _, port := range openPorts {
 		if skipWeb[port] {
 			continue
@@ -664,14 +699,16 @@ func categoryOrder(cat string) int {
 	switch cat {
 	case "synology":
 		return 0
-	case "web":
+	case "proxmox":
 		return 1
-	case "linux":
+	case "web":
 		return 2
-	case "windows":
+	case "linux":
 		return 3
-	default:
+	case "windows":
 		return 4
+	default:
+		return 5
 	}
 }
 

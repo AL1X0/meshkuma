@@ -88,6 +88,12 @@ type ProbeDTO struct {
 	MaxRAMPercent  float64  `json:"max_ram_percent,omitempty" yaml:"max_ram_percent,omitempty"`
 	Disks          []string `json:"disks,omitempty" yaml:"disks,omitempty"`
 	Services       []string `json:"services,omitempty" yaml:"services,omitempty"`
+
+	TokenID       string   `json:"token_id,omitempty" yaml:"token_id,omitempty"`
+	TokenSecret   string   `json:"token_secret,omitempty" yaml:"token_secret,omitempty"`
+	Node          string   `json:"node,omitempty" yaml:"node,omitempty"`
+	MaxCPUPercent float64  `json:"max_cpu_percent,omitempty" yaml:"max_cpu_percent,omitempty"`
+	VMs           []string `json:"vms,omitempty" yaml:"vms,omitempty"`
 }
 
 type NotificationsDTO struct {
@@ -170,6 +176,11 @@ func configToDTO(cfg *config.Config) ConfigDTO {
 			MaxRAMPercent:      p.MaxRAMPercent,
 			Disks:              append([]string(nil), p.Disks...),
 			Services:           append([]string(nil), p.Services...),
+			TokenID:            p.TokenID,
+			TokenSecret:        p.TokenSecret,
+			Node:               p.Node,
+			MaxCPUPercent:      p.MaxCPUPercent,
+			VMs:                append([]string(nil), p.VMs...),
 		}
 		probesList = append(probesList, dto)
 	}
@@ -314,6 +325,17 @@ func cleanDTO(in ConfigDTO) ConfigDTO {
 			cp.MaxRAMPercent = p.MaxRAMPercent
 			cp.Disks = trimSlice(p.Disks)
 			cp.Services = trimSlice(p.Services)
+		case "proxmox":
+			cp.URL = strings.TrimSpace(p.URL)
+			cp.InsecureSkipVerify = p.InsecureSkipVerify
+			cp.TokenID = strings.TrimSpace(p.TokenID)
+			cp.TokenSecret = p.TokenSecret
+			cp.Node = strings.TrimSpace(p.Node)
+			cp.MaxCPUPercent = p.MaxCPUPercent
+			cp.MaxRAMPercent = p.MaxRAMPercent
+			cp.MaxDiskPercent = p.MaxDiskPercent
+			cp.Disks = trimSlice(p.Disks)
+			cp.VMs = trimSlice(p.VMs)
 		default:
 			cp = p
 		}

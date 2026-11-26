@@ -27,7 +27,7 @@ Quand votre fibre tombe ou que votre serveur domestique plante, **votre propre o
 **MeshWatch** résout ce problème en créant un **maillage P2P de supervision 100 % autonome entre amis** :
 
 - Chacun héberge **un seul conteneur Docker Go** (**11,5 Mo**, `~11 Mo` de RAM) dans son propre LAN — aucune base de données externe, aucun outil tiers à maintenir.
-- Chaque agent exécute **localement** ses sondes (Synology SNMP, Docker, Linux `node_exporter`, Windows `windows_exporter`, HTTP/TLS, TCP, SNMP générique) et conserve un **historique de disponibilité + journal des incidents intégré**.
+- Chaque agent exécute **localement** ses sondes (Synology SNMP, Proxmox VE API, Docker, Linux `node_exporter`, Windows `windows_exporter`, HTTP/TLS, TCP, SNMP générique) et conserve un **historique de disponibilité + journal des incidents intégré**.
 - Il publie périodiquement un résumé JSON **chiffré en AES-256-GCM** via des **relais Nostr publics** (`kind: 24242`, éphémères, jamais stockés sur disque).
 - Les pairs abonnés reçoivent ces heartbeats, affichent la santé et la disponibilité de chaque ami dans leur interface, et élisent automatiquement **un seul notificateur** (`ntfy` / **Photon iMessage**) en cas de panne — fini les tempêtes d'alertes !
 
@@ -145,6 +145,7 @@ Toutes les sondes tournent de manière concurrente sur leur propre `time.Ticker`
 | Type (`kind`) | Protocole / Source | Ce qui est vérifié |
 | :--- | :--- | :--- |
 | `synology` | SNMPv2c & SNMPv3 (`gosnmp`) | État système (`.6574.1.1.0`), température (`.6574.1.2.0`, seuil `max_temp_c`), ventilateurs système/alim (`.6574.1.4.1.0`, `.2.0`), walk RAID (`.6574.3.1.1.3`) et walk Disques (`.6574.2.1.1.5`). |
+| `proxmox` | REST API Proxmox VE (`/api2/json/cluster/resources`) | Statut des nœuds, CPU (`max_cpu_percent`), RAM (`max_ram_percent`), stockages (`max_disk_percent`, `disks`) et état des VM/LXC critiques (`vms`) via `PVEAPIToken`. |
 | `docker` | Unix socket ou `tcp://docker-socket-proxy:2375` | Conteneurs nommés ou filtrés par label (`meshwatch.enable=true`), état `running`, healthcheck `unhealthy` et seuil `max_restarts`. Client HTTP natif léger (sans SDK Docker lourd). |
 | `node_exporter` | HTTP `/metrics` (Linux) | % utilisation RAM (`max_ram_percent`) et % occupation des disques réels (`max_disk_percent`, ignore automatiquement `tmpfs`/`overlay`/`proc`…). |
 | `windows_exporter` | HTTP `/metrics` (Windows) | % utilisation RAM, % disques logiques (`C:`, etc.) et état temps réel des services Windows configurés (`windows_service_state{state="running"} == 1`). |

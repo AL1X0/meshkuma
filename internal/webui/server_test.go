@@ -224,6 +224,40 @@ func TestWebUIServerEndpointsAndAuth(t *testing.T) {
 		t.Fatalf("probes/test unexpected result: %+v err=%v", pRes, err)
 	}
 
+	// 6b-proxmox. POST /api/probes/test verifies Proxmox API probe DTO/validation/check
+	pveSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api2/json/cluster/resources" && r.Header.Get("Authorization") == "PVEAPIToken=root@pam!mw=sec" {
+			_, _ = w.Write([]byte(`{"data":[{"type":"node","node":"pve","status":"online","cpu":0.15,"maxcpu":4,"mem":4,"maxmem":10,"disk":2,"maxdisk":10}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer pveSrv.Close()
+
+	pvePayload, _ := json.Marshal(map[string]any{
+		"probe": map[string]any{
+			"id":                   "pve-test",
+			"kind":                 "proxmox",
+			"url":                  pveSrv.URL,
+			"token_id":             "root@pam!mw",
+			"token_secret":         "sec",
+			"insecure_skip_verify": true,
+			"max_cpu_percent":      90,
+		},
+	})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/probes/test", bytes.NewReader(pvePayload))
+	req.Header.Set("Authorization", "Bearer super-secret-token")
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proxmox probes/test status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var pveRes probes.ProbeResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &pveRes); err != nil || !pveRes.OK || !strings.Contains(pveRes.Summary, "pve en ligne") {
+		t.Fatalf("proxmox probes/test unexpected result: %+v err=%v", pveRes, err)
+	}
+
 	// 6c. POST /api/probes/run triggers immediate refresh
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/probes/run", strings.NewReader("{}"))

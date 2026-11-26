@@ -58,6 +58,17 @@ probes:
     expected_status: 200
     tls_min_days: 14
 
+  - id: "proxmox-main"
+    kind: "proxmox"
+    interval: 60s
+    url: "https://192.168.1.30:8006"
+    token_id: "root@pam!meshwatch"
+    token_secret: "REMPLACER_SECRET_PROXMOX"
+    insecure_skip_verify: true
+    max_cpu_percent: 90
+    max_ram_percent: 90
+    max_disk_percent: 90
+
 notifications:
   ntfy:
     enabled: true

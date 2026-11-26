@@ -4,6 +4,7 @@
   const PROBE_KINDS = [
     { value: "http", label: "Site ou app web" },
     { value: "synology", label: "NAS Synology" },
+    { value: "proxmox", label: "Serveur Proxmox VE" },
     { value: "docker", label: "Conteneurs Docker" },
     { value: "tcp", label: "Appareil du réseau" },
     { value: "node_exporter", label: "Serveur Linux" },
@@ -45,6 +46,7 @@
     parsedInvite: null,
     modalProbeIndex: -1,
     modalProbeDraft: null,
+    modalOnSaved: null,
     modalFriendIndex: -1,
     toastTimer: null,
     pollHandle: null
@@ -222,6 +224,18 @@
       return "Service joignable sur le réseau";
     }
 
+    // Proxmox API
+    if (/^(Node|CPU|RAM|Disque|Stockage|VM\/LXC|Proxmox)|en ligne/i.test(s)) {
+      return humanizeError(
+        s
+          .replace(/\boffline\b/gi, "hors ligne")
+          .replace(/\bstopped\b/gi, "arrêtée")
+          .replace(/\bpaused\b/gi, "en pause")
+          .replace(/\bunavailable\b/gi, "indisponible")
+          .replace(/\bunknown\b/gi, "état inconnu")
+      );
+    }
+
     return humanizeError(s);
   }
 
@@ -290,6 +304,31 @@
     if (/^https?:\/\//i.test(s)) return s;
     const hasPort = /:\d+$/.test(s);
     return "http://" + s + (hasPort ? "" : ":" + defaultPort) + "/metrics";
+  }
+
+  function extractHostFromProxmoxURL(url) {
+    const s = String(url || "").trim();
+    if (!s) return "";
+    try {
+      const u = new URL(s);
+      const pathLower = (u.pathname || "").toLowerCase();
+      if (u.protocol === "https:" && (!u.port || Number(u.port) === 8006) && (!u.pathname || u.pathname === "/" || pathLower === "/api2/json" || pathLower === "/api2/json/")) {
+        return u.hostname;
+      }
+    } catch (_) {}
+    return s;
+  }
+
+  function buildProxmoxURL(input) {
+    let s = String(input || "").trim();
+    if (!s) return "";
+    s = s.replace(/\/api2\/json\/?$/i, "").replace(/\/+$/, "");
+    if (/^https?:\/\//i.test(s)) return s;
+    const hasPort = /:\d+$/.test(s) || /\]:\d+$/.test(s);
+    if (s.includes(":") && !s.startsWith("[") && !hasPort) {
+      s = "[" + s + "]";
+    }
+    return "https://" + s + (hasPort ? "" : ":8006");
   }
 
   /* ---------------- API ---------------- */
@@ -1056,9 +1095,12 @@
 
     list.innerHTML = filtered
       .map(({ item, idx }) => {
+        const needsConfig = item.suggested_probe && item.suggested_probe.kind === "proxmox";
         const actionHTML = item.already_monitored
           ? '<span class="status-cell is-ok"><span class="status-dot is-ok"></span>Déjà surveillé</span>'
-          : '<button type="button" class="btn-primary" data-add-discovered="' + idx + '">Surveiller</button>';
+          : needsConfig
+            ? '<button type="button" class="btn-primary" data-configure-discovered="' + idx + '">Configurer</button>'
+            : '<button type="button" class="btn-primary" data-add-discovered="' + idx + '">Surveiller</button>';
         return (
           '<div class="surface-row">' +
           '<div class="row-main">' +
@@ -1073,6 +1115,22 @@
         );
       })
       .join("");
+
+    list.querySelectorAll("[data-configure-discovered]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = Number(btn.dataset.configureDiscovered);
+        const item = state.lanItems[idx];
+        if (!item || !item.suggested_probe) return;
+        openProbeModalFromTemplate(
+          item.suggested_probe,
+          "Renseignez votre jeton API Proxmox VE puis testez la connexion.",
+          () => {
+            item.already_monitored = true;
+            renderLANResults();
+          }
+        );
+      });
+    });
 
     list.querySelectorAll("[data-add-discovered]").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -1179,6 +1237,12 @@
       case "node_exporter":
       case "windows_exporter":
         return p.url || "";
+      case "proxmox":
+        return (
+          (p.url || "") +
+          (p.node ? " · nœud " + p.node : "") +
+          (p.vms && p.vms.length ? " · " + p.vms.length + " VM/LXC" : "")
+        );
       case "synology":
       case "snmp_oid":
         return (p.host || "") + " (SNMP)";
@@ -1204,6 +1268,20 @@
         return Object.assign(base, { id: "docker-local", interval: "30s", socket: state.dockerSocket, containers: [] });
       case "synology":
         return Object.assign(base, { id: "nas-synology", host: "192.168.1.20", port: 161, snmp_version: "2c", community: "public", max_temp_c: 55 });
+      case "proxmox":
+        return Object.assign(base, {
+          id: "proxmox",
+          url: "https://192.168.1.30:8006",
+          token_id: "",
+          token_secret: "",
+          insecure_skip_verify: true,
+          max_cpu_percent: 90,
+          max_ram_percent: 90,
+          max_disk_percent: 90,
+          node: "",
+          vms: [],
+          disks: []
+        });
       case "snmp_oid":
         return Object.assign(base, { id: "capteur-snmp-" + (count + 1), host: "192.168.1.50", port: 161, snmp_version: "2c", community: "public", oid: ".1.3.6.1.2.1.1.3.0", expected_value: "1" });
       case "node_exporter":
@@ -1217,6 +1295,7 @@
 
   function openProbeModal(editIndex) {
     state.modalProbeIndex = editIndex;
+    state.modalOnSaved = null;
     $("probe-test-result").hidden = true;
 
     if (editIndex >= 0 && state.config && state.config.probes[editIndex]) {
@@ -1238,10 +1317,29 @@
     $("probe-modal").hidden = false;
   }
 
+  function openProbeModalFromTemplate(templateProbe, customSubtitle, onSaved) {
+    state.modalProbeIndex = -1;
+    state.modalOnSaved = typeof onSaved === "function" ? onSaved : null;
+    state.modalProbeDraft = deepClone(templateProbe || {});
+    state.modalProbeDraft.id = ensureUniqueProbeID(
+      state.modalProbeDraft.id || slugifyID(state.modalProbeDraft.kind, "service"),
+      -1
+    );
+    $("probe-modal-title").textContent = "Configurer : " + probeKindLabel(state.modalProbeDraft.kind);
+    $("probe-modal-subtitle").textContent = customSubtitle || "Complétez les informations ci-dessous puis testez la connexion.";
+    $("probe-modal-picker").hidden = true;
+    $("probe-modal-form").hidden = false;
+    $("probe-modal-back").hidden = true;
+    $("probe-test-result").hidden = true;
+    renderProbeModalFields();
+    $("probe-modal").hidden = false;
+  }
+
   function closeProbeModal() {
     $("probe-modal").hidden = true;
     state.modalProbeDraft = null;
     state.modalProbeIndex = -1;
+    state.modalOnSaved = null;
   }
 
   function pickProbeKindInModal(kind) {
@@ -1369,6 +1467,41 @@
           '<input type="number" data-mp="max_restarts" data-type="int" value="' + escapeHTML(p.max_restarts || 0) + '"></label>';
         break;
 
+      case "proxmox": {
+        const hostVal = extractHostFromProxmoxURL(p.url);
+        const insecureChecked = p.insecure_skip_verify !== false;
+        if (p.insecure_skip_verify === undefined) {
+          p.insecure_skip_verify = true;
+        }
+        simpleHTML =
+          '<div class="help-callout">Dans Proxmox VE : ouvrez <strong>Datacenter → Permissions → API Tokens → Add</strong>, créez un jeton (ex. <span class="mono-inline">root@pam</span> + ID <span class="mono-inline">meshwatch</span>), décochez <strong>Privilege Separation</strong> <em>(ou accordez le rôle <span class="mono-inline">PVEAuditor</span> sur <span class="mono-inline">/</span>)</em>. Collez les deux valeurs ci-dessous.</div>' +
+          '<label class="field"><span class="field-label">Adresse IP ou URL Proxmox</span>' +
+          '<input type="text" class="mono" id="mp-proxmox-host" value="' + escapeHTML(hostVal) + '" placeholder="192.168.1.30 ou https://pve.local:8006" required></label>' +
+          '<label class="field"><span class="field-label">Token ID Proxmox</span>' +
+          '<input type="text" class="mono" data-mp="token_id" value="' + escapeHTML(p.token_id || "") + '" placeholder="root@pam!meshwatch" required></label>' +
+          '<div class="field span-2"><span class="field-label">Secret du jeton API</span>' +
+          '<div class="input-with-action">' +
+          '<input type="password" class="mono" id="mp-proxmox-secret" data-mp="token_secret" autocomplete="off" value="' + escapeHTML(p.token_secret || "") + '" placeholder="UUID secret généré par Proxmox">' +
+          '<button type="button" class="field-action" data-toggle-secret="mp-proxmox-secret">Afficher</button>' +
+          "</div></div>" +
+          '<label class="field span-2"><span class="field-label">VM ou conteneurs LXC critiques à vérifier (optionnel, séparés par des virgules)</span>' +
+          '<input type="text" class="mono" data-mp="vms" data-type="csv" value="' + escapeHTML((p.vms || []).join(", ")) + '" placeholder="Ex. 100, 102, homeassistant"></label>';
+        advHTML =
+          '<label class="field"><span class="field-label">Alerte CPU (%)</span>' +
+          '<input type="number" step="any" data-mp="max_cpu_percent" data-type="float" value="' + escapeHTML(p.max_cpu_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte mémoire RAM (%)</span>' +
+          '<input type="number" step="any" data-mp="max_ram_percent" data-type="float" value="' + escapeHTML(p.max_ram_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Alerte stockage / disque (%)</span>' +
+          '<input type="number" step="any" data-mp="max_disk_percent" data-type="float" value="' + escapeHTML(p.max_disk_percent || 90) + '"></label>' +
+          '<label class="field"><span class="field-label">Nœud Proxmox ciblé (optionnel)</span>' +
+          '<input type="text" class="mono" data-mp="node" value="' + escapeHTML(p.node || "") + '" placeholder="Tous les nœuds si vide (ex. pve)"></label>' +
+          '<label class="field span-2"><span class="field-label">Stockages spécifiques à surveiller (optionnel, séparés par des virgules)</span>' +
+          '<input type="text" class="mono" data-mp="disks" data-type="csv" value="' + escapeHTML((p.disks || []).join(", ")) + '" placeholder="Ex. local-lvm, zfs-data"></label>' +
+          '<div class="field span-2"><span class="field-label">Certificat HTTPS auto-signé Proxmox (port 8006)</span>' +
+          '<label class="switch-control"><input type="checkbox" data-mp="insecure_skip_verify" data-type="bool"' + (insecureChecked ? " checked" : "") + '><span class="switch-track"></span><span class="switch-text">Accepter</span></label></div>';
+        break;
+      }
+
       case "snmp_oid":
         simpleHTML =
           '<label class="field"><span class="field-label">Adresse IP de l\'appareil</span>' +
@@ -1415,6 +1548,23 @@
     normalizeDurationSelect($("mp-interval-select"), p.interval || "1m");
     normalizeDurationSelect($("mp-timeout-select"), p.timeout || "10s");
 
+    const pveHost = $("mp-proxmox-host");
+    if (pveHost) {
+      pveHost.addEventListener("input", () => {
+        state.modalProbeDraft.url = buildProxmoxURL(pveHost.value);
+      });
+    }
+
+    container.querySelectorAll("[data-toggle-secret]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const input = $(btn.dataset.toggleSecret);
+        if (!input) return;
+        const hidden = input.type === "password";
+        input.type = hidden ? "text" : "password";
+        btn.textContent = hidden ? "Masquer" : "Afficher";
+      });
+    });
+
     const expHost = $("mp-exporter-host");
     if (expHost) {
       const defPort = p.kind === "node_exporter" ? 9100 : 9182;
@@ -1459,6 +1609,10 @@
   function syncProbeDraftFromModal() {
     const p = state.modalProbeDraft;
     if (!p) return null;
+    const pveHost = $("mp-proxmox-host");
+    if (pveHost) {
+      p.url = buildProxmoxURL(pveHost.value);
+    }
     const expHost = $("mp-exporter-host");
     if (expHost) {
       const defPort = p.kind === "node_exporter" ? 9100 : 9182;
@@ -1529,7 +1683,9 @@
     saveBtn.textContent = "Enregistrer";
 
     if (ok) {
+      const cb = state.modalOnSaved;
       closeProbeModal();
+      if (cb) cb();
       renderManagedProbes();
     } else {
       state.config.probes = prevProbes;

@@ -92,6 +92,16 @@ probes:
     priv_pass: "secretpriv"
     oid: ".1.3.6.1.2.1.33.1.4.4.1.5.1"
     max_value: 80
+  - id: "pve-main"
+    kind: "proxmox"
+    url: "https://192.168.1.30:8006"
+    token_id: "root@pam!meshwatch"
+    token_secret: "secret-proxmox-token"
+    insecure_skip_verify: true
+    max_cpu_percent: 90
+    max_ram_percent: 90
+    max_disk_percent: 90
+    vms: ["100", "homeassistant"]
 
 notifications:
   ntfy:
@@ -130,8 +140,8 @@ func TestParseValidConfig(t *testing.T) {
 	if _, ok := allowed[peerPub]; !ok {
 		t.Fatalf("peer %s missing from AllowedPeers()", peerPub)
 	}
-	if len(cfg.Probes) != 7 {
-		t.Fatalf("len(Probes) = %d, want 7", len(cfg.Probes))
+	if len(cfg.Probes) != 8 {
+		t.Fatalf("len(Probes) = %d, want 8", len(cfg.Probes))
 	}
 }
 
@@ -281,6 +291,41 @@ probes:
 			wantSub: "unsupported kind",
 		},
 		{
+			name: "proxmox invalid token_id",
+			yaml: fmt.Sprintf(`
+node:
+  name: "test"
+  private_key_hex: "%s"
+  group_psk_hex: "%s"
+nostr:
+  relays: ["wss://nos.lol"]
+probes:
+  - id: "pve"
+    kind: "proxmox"
+    url: "https://192.168.1.30:8006"
+    token_id: "root@pam"
+    token_secret: "secret"
+`, priv, psk),
+			wantSub: "user@realm!tokenname",
+		},
+		{
+			name: "proxmox missing token_secret",
+			yaml: fmt.Sprintf(`
+node:
+  name: "test"
+  private_key_hex: "%s"
+  group_psk_hex: "%s"
+nostr:
+  relays: ["wss://nos.lol"]
+probes:
+  - id: "pve"
+    kind: "proxmox"
+    url: "https://192.168.1.30:8006"
+    token_id: "root@pam!meshwatch"
+`, priv, psk),
+			wantSub: "token_secret is required",
+		},
+		{
 			name: "invalid notifications",
 			yaml: fmt.Sprintf(`
 node:
@@ -333,7 +378,7 @@ func TestConfigExampleYAMLSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.example.yaml failed validation after replacing placeholders: %v", err)
 	}
-	if len(cfg.Probes) != 5 || len(cfg.Peers) != 1 {
+	if len(cfg.Probes) != 6 || len(cfg.Peers) != 1 {
 		t.Fatalf("unexpected counts in config.example.yaml: probes=%d peers=%d", len(cfg.Probes), len(cfg.Peers))
 	}
 }

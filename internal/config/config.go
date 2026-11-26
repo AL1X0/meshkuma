@@ -123,6 +123,13 @@ type ProbeConfig struct {
 	MaxRAMPercent  float64  `yaml:"max_ram_percent"`
 	Disks          []string `yaml:"disks"`
 	Services       []string `yaml:"services"`
+
+	// Proxmox VE API probe
+	TokenID       string   `yaml:"token_id"`
+	TokenSecret   string   `yaml:"token_secret"`
+	Node          string   `yaml:"node"`
+	MaxCPUPercent float64  `yaml:"max_cpu_percent"`
+	VMs           []string `yaml:"vms"`
 }
 
 // NotificationsConfig configures outbound alert channels.
@@ -270,6 +277,14 @@ func (c *Config) applyDefaults() {
 			}
 			if p.SNMPVersion == "" {
 				p.SNMPVersion = "2c"
+			}
+		case "proxmox":
+			if strings.TrimSpace(p.URL) == "" && strings.TrimSpace(p.Host) != "" {
+				port := p.Port
+				if port == 0 {
+					port = 8006
+				}
+				p.URL = fmt.Sprintf("https://%s", net.JoinHostPort(strings.TrimSpace(p.Host), fmt.Sprintf("%d", port)))
 			}
 		}
 	}
@@ -512,8 +527,38 @@ func validateProbe(idx int, p *ProbeConfig) []error {
 		if p.MaxRAMPercent < 0 || p.MaxRAMPercent > 100 {
 			errs = append(errs, fmt.Errorf("%s: max_ram_percent must be 0..100", prefix))
 		}
+	case "proxmox":
+		if err := validateHTTPURL(p.URL); err != nil {
+			errs = append(errs, fmt.Errorf("%s: url: %w", prefix, err))
+		}
+		tid := strings.TrimSpace(p.TokenID)
+		if len(tid) >= len("PVEAPIToken=") && strings.EqualFold(tid[:len("PVEAPIToken=")], "PVEAPIToken=") {
+			tid = strings.TrimSpace(tid[len("PVEAPIToken="):])
+		}
+		hasInlineSecret := false
+		if eq := strings.IndexByte(tid, '='); eq > 0 {
+			if strings.TrimSpace(tid[eq+1:]) != "" {
+				hasInlineSecret = true
+			}
+			tid = strings.TrimSpace(tid[:eq])
+		}
+		if tid == "" || !strings.Contains(tid, "!") {
+			errs = append(errs, fmt.Errorf("%s: token_id must follow user@realm!tokenname format", prefix))
+		}
+		if strings.TrimSpace(p.TokenSecret) == "" && !hasInlineSecret {
+			errs = append(errs, fmt.Errorf("%s: token_secret is required for proxmox probe", prefix))
+		}
+		if p.MaxCPUPercent < 0 || p.MaxCPUPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_cpu_percent must be 0..100", prefix))
+		}
+		if p.MaxRAMPercent < 0 || p.MaxRAMPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_ram_percent must be 0..100", prefix))
+		}
+		if p.MaxDiskPercent < 0 || p.MaxDiskPercent > 100 {
+			errs = append(errs, fmt.Errorf("%s: max_disk_percent must be 0..100", prefix))
+		}
 	default:
-		errs = append(errs, fmt.Errorf("%s: unsupported kind %q (supported: http, tcp, docker, synology, snmp_oid, node_exporter, windows_exporter)", prefix, p.Kind))
+		errs = append(errs, fmt.Errorf("%s: unsupported kind %q (supported: http, tcp, docker, synology, snmp_oid, node_exporter, windows_exporter, proxmox)", prefix, p.Kind))
 	}
 
 	return errs

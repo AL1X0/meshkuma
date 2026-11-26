@@ -66,6 +66,10 @@
             <span class="kind-card-title">NAS Synology</span>
             <span class="kind-card-desc">Santé RAID, disques durs, température et ventilateurs</span>
           </button>
+          <button type="button" class="kind-card" data-pick-kind="proxmox">
+            <span class="kind-card-title">Serveur Proxmox VE</span>
+            <span class="kind-card-desc">Nœuds, CPU, RAM, stockages et état des VM/LXC via API</span>
+          </button>
           <button type="button" class="kind-card" data-pick-kind="docker">
             <span class="kind-card-title">Conteneurs Docker</span>
             <span class="kind-card-desc">Choisir dans la liste des applications Docker locales</span>
@@ -82,9 +86,10 @@
             <span class="kind-card-title">PC ou serveur Windows</span>
             <span class="kind-card-desc">Disques, RAM et services Windows essentiels</span>
           </button>
-        </div>
-        <div class="modal-picker-footer">
-          <button type="button" class="inline-action" data-pick-kind="snmp_oid">Ajouter un capteur SNMP personnalisé (avancé)</button>
+          <button type="button" class="kind-card" data-pick-kind="snmp_oid">
+            <span class="kind-card-title">Capteur SNMP personnalisé</span>
+            <span class="kind-card-desc">OID avancé (onduleur UPS, switch réseau...)</span>
+          </button>
         </div>
       </div>
 
@@ -367,7 +372,7 @@
           </div>
         </div>
 
-        <p id="lan-scan-meta" class="muted-copy scan-meta">Cliquez sur Scanner mon réseau pour trouver automatiquement vos NAS Synology, serveurs et applications web.</p>
+        <p id="lan-scan-meta" class="muted-copy scan-meta">Cliquez sur Scanner mon réseau pour trouver automatiquement vos NAS Synology, serveurs Proxmox VE, serveurs Linux/Windows et applications web.</p>
         <div id="lan-results-list" class="surface-list"></div>
       </div>
 

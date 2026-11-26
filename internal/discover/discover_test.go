@@ -116,3 +116,21 @@ func TestScanLANDiscoversLocalHTTPService(t *testing.T) {
 		t.Fatalf("unexpected discovered item: %+v", item)
 	}
 }
+
+func TestClassifyHostProxmox(t *testing.T) {
+	client := &http.Client{Timeout: 80 * time.Millisecond}
+	items := classifyHost(context.Background(), client, "192.168.1.30", []int{8006, 22}, map[int]portProfile{
+		8006: {port: 8006, https: true, hintName: "Proxmox VE", category: "proxmox"},
+		22:   {port: 22, skipTitle: true, hintName: "Serveur Linux (SSH)", category: "linux"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1 (Proxmox should not duplicate HTTP or SSH fallback): %+v", len(items), items)
+	}
+	item := items[0]
+	if item.Category != "proxmox" || item.SuggestedProbe.Kind != "proxmox" {
+		t.Fatalf("unexpected item kind/category: %+v", item)
+	}
+	if item.SuggestedProbe.URL != "https://192.168.1.30:8006" || !item.SuggestedProbe.InsecureSkipVerify {
+		t.Fatalf("unexpected Proxmox suggested probe: %+v", item.SuggestedProbe)
+	}
+}

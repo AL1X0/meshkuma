@@ -564,3 +564,166 @@ windows_service_state{name="veeambackupsvc",state="stopped"} 1
 		t.Fatalf("expected stopped service + full disk failure, got %+v", res)
 	}
 }
+
+func TestProxmoxProbe(t *testing.T) {
+	healthyResources := `{
+  "data": [
+    {"type": "node", "node": "pve", "status": "online", "cpu": 0.24, "maxcpu": 8, "mem": 8589934592, "maxmem": 17179869184, "disk": 10000000000, "maxdisk": 50000000000, "uptime": 123456},
+    {"type": "storage", "node": "pve", "storage": "local", "status": "available", "disk": 20000000000, "maxdisk": 100000000000, "shared": 0},
+    {"type": "storage", "node": "pve", "storage": "local-lvm", "status": "available", "disk": 250000000000, "maxdisk": 500000000000, "shared": 0},
+    {"type": "qemu", "node": "pve", "vmid": 100, "name": "homeassistant", "status": "running", "template": 0},
+    {"type": "lxc", "node": "pve", "vmid": 102, "name": "reverse-proxy", "status": "running", "template": 0},
+    {"type": "qemu", "node": "pve", "vmid": 9000, "name": "ubuntu-tpl", "status": "stopped", "template": 1}
+  ]
+}`
+
+	var gotAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/api2/json/cluster/resources":
+			switch r.Header.Get("Authorization") {
+			case "PVEAPIToken=root@pam!meshwatch=secret-uuid":
+				_, _ = w.Write([]byte(healthyResources))
+			case "PVEAPIToken=monitor@pve!ro=abc-123":
+				_, _ = w.Write([]byte(healthyResources))
+			case "PVEAPIToken=root@pam!bad=wrong":
+				w.WriteHeader(http.StatusUnauthorized)
+			case "PVEAPIToken=root@pam!empty=nodata":
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			case "PVEAPIToken=root@pam!nodesonly=fb":
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			case "PVEAPIToken=root@pam!fail=cases":
+				_, _ = w.Write([]byte(`{
+  "data": [
+    {"type": "node", "node": "pve1", "status": "offline", "cpu": 0, "maxcpu": 8, "mem": 0, "maxmem": 100, "disk": 0, "maxdisk": 100},
+    {"type": "node", "node": "pve2", "status": "online", "cpu": 0.95, "maxcpu": 8, "mem": 95, "maxmem": 100, "disk": 20, "maxdisk": 100},
+    {"type": "storage", "node": "pve2", "storage": "nas-nfs", "status": "unknown", "disk": 96, "maxdisk": 100, "shared": 1},
+    {"type": "qemu", "node": "pve2", "vmid": 100, "name": "homeassistant", "status": "stopped", "template": 0}
+  ]
+}`))
+			default:
+				w.WriteHeader(http.StatusForbidden)
+			}
+		case "/api2/json/nodes":
+			if r.Header.Get("Authorization") == "PVEAPIToken=root@pam!nodesonly=fb" {
+				_, _ = w.Write([]byte(`{"data":[{"node":"pve-fb","status":"online","cpu":0.18,"maxcpu":4,"mem":20,"maxmem":100,"disk":30,"maxdisk":100}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// 1. Healthy cluster/resources + VMID and name matching + template excluded
+	pOK := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-main",
+		URL:                srv.URL,
+		TokenID:            "root@pam!meshwatch",
+		TokenSecret:        "secret-uuid",
+		InsecureSkipVerify: true,
+		MaxCPUPercent:      90,
+		MaxRAMPercent:      90,
+		MaxDiskPercent:     90,
+		VMs:                []string{"100", "reverse-proxy"},
+	})
+	res := pOK.Check(context.Background())
+	if !res.OK {
+		t.Fatalf("expected Proxmox healthy OK, got %+v", res)
+	}
+	if gotAuth != "PVEAPIToken=root@pam!meshwatch=secret-uuid" {
+		t.Fatalf("Authorization = %q, want PVEAPIToken=root@pam!meshwatch=secret-uuid", gotAuth)
+	}
+	for _, want := range []string{"pve en ligne", "CPU 24%", "RAM 50%", "Stockage local-lvm 50%", "2/2 VM/LXC actives"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("summary %q missing %q", res.Summary, want)
+		}
+	}
+
+	// 2. Combined token string + trailing /api2/json URL
+	pCombined := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-combined",
+		URL:                srv.URL + "/api2/json/",
+		TokenID:            "PVEAPIToken=monitor@pve!ro=abc-123",
+		InsecureSkipVerify: true,
+		MaxCPUPercent:      90,
+	})
+	res = pCombined.Check(context.Background())
+	if !res.OK || gotAuth != "PVEAPIToken=monitor@pve!ro=abc-123" {
+		t.Fatalf("combined token probe failed: res=%+v auth=%q", res, gotAuth)
+	}
+
+	// 3. Failure conditions: offline node, CPU > max, RAM > max, storage unavailable + > max, VM stopped, missing VM
+	pFail := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-fail",
+		URL:                srv.URL,
+		TokenID:            "root@pam!fail",
+		TokenSecret:        "cases",
+		InsecureSkipVerify: true,
+		MaxCPUPercent:      90,
+		MaxRAMPercent:      90,
+		MaxDiskPercent:     90,
+		VMs:                []string{"100", "999"},
+	})
+	res = pFail.Check(context.Background())
+	if res.OK {
+		t.Fatalf("expected Proxmox failures, got OK: %+v", res)
+	}
+	for _, want := range []string{
+		"Node pve1 offline",
+		"CPU (pve2) 95.0% > 90%",
+		"RAM (pve2) 95.0% > 90%",
+		"Stockage nas-nfs (pve2) unknown",
+		"Stockage nas-nfs 96.0% > 90%",
+		"VM/LXC homeassistant (100) stopped",
+		"VM/LXC 999 introuvable",
+	} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("failure summary %q missing %q", res.Summary, want)
+		}
+	}
+
+	// 4a. HTTP 401 auth error
+	pUnauth := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-unauth",
+		URL:                srv.URL,
+		TokenID:            "root@pam!bad",
+		TokenSecret:        "wrong",
+		InsecureSkipVerify: true,
+	})
+	res = pUnauth.Check(context.Background())
+	if res.OK || !strings.Contains(res.Summary, "HTTP 401") || !strings.Contains(res.Summary, "PVEAuditor") {
+		t.Fatalf("expected HTTP 401 guidance, got %+v", res)
+	}
+
+	// 4b. Empty /cluster/resources falls back to /nodes when /nodes returns data
+	pNodesFB := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-nodes-fb",
+		URL:                srv.URL,
+		TokenID:            "root@pam!nodesonly",
+		TokenSecret:        "fb",
+		InsecureSkipVerify: true,
+		MaxCPUPercent:      90,
+		MaxRAMPercent:      90,
+		MaxDiskPercent:     90,
+	})
+	res = pNodesFB.Check(context.Background())
+	if !res.OK || !strings.Contains(res.Summary, "pve-fb en ligne") || !strings.Contains(res.Summary, "Disque root 30%") {
+		t.Fatalf("expected /nodes fallback OK, got %+v", res)
+	}
+
+	// 4c. Empty /cluster/resources AND empty /nodes returns Privilege Separation guidance
+	pEmpty := NewProxmoxProbe(config.ProbeConfig{
+		ID:                 "pve-empty",
+		URL:                srv.URL,
+		TokenID:            "root@pam!empty",
+		TokenSecret:        "nodata",
+		InsecureSkipVerify: true,
+	})
+	res = pEmpty.Check(context.Background())
+	if res.OK || !strings.Contains(res.Summary, "Privilege Separation") || !strings.Contains(res.Summary, "PVEAuditor") {
+		t.Fatalf("expected Privilege Separation guidance, got %+v", res)
+	}
+}
