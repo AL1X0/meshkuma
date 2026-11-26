@@ -318,6 +318,7 @@ func (p *NodeExporterProbe) Check(ctx context.Context) ProbeResult {
 
 	var issues []string
 	var okNotes []string
+	m := &ProbeMetrics{}
 
 	// Evaluate RAM
 	if hasMemTotal && memTotal > 0 {
@@ -328,6 +329,12 @@ func (p *NodeExporterProbe) Check(ctx context.Context) ProbeResult {
 		ramPct := (1.0 - avail/memTotal) * 100.0
 		if ramPct < 0 {
 			ramPct = 0
+		}
+		m.RAMPercent = floatPtr(ramPct)
+		m.RAMTotalMB = memTotal / (1024 * 1024)
+		m.RAMUsedMB = (memTotal - avail) / (1024 * 1024)
+		if m.RAMUsedMB < 0 {
+			m.RAMUsedMB = 0
 		}
 		if p.maxRAMPercent > 0 && ramPct > p.maxRAMPercent {
 			issues = append(issues, fmt.Sprintf("RAM %.1f%% > %.0f%%", ramPct, p.maxRAMPercent))
@@ -362,6 +369,13 @@ func (p *NodeExporterProbe) Check(ctx context.Context) ProbeResult {
 		if usedPct < 0 {
 			usedPct = 0
 		}
+		m.Disks = append(m.Disks, DiskMetric{
+			Name:        mp,
+			Mount:       mp,
+			UsedPercent: usedPct,
+			UsedGB:      (st.size - st.avail) / (1024 * 1024 * 1024),
+			TotalGB:     st.size / (1024 * 1024 * 1024),
+		})
 		if usedPct > maxDiskUsed {
 			maxDiskUsed = usedPct
 			maxDiskMount = mp
@@ -371,6 +385,7 @@ func (p *NodeExporterProbe) Check(ctx context.Context) ProbeResult {
 		}
 	}
 	if maxDiskUsed >= 0 {
+		m.DiskMaxPct = floatPtr(maxDiskUsed)
 		okNotes = append(okNotes, fmt.Sprintf("Disk %s %.0f%%", maxDiskMount, maxDiskUsed))
 	}
 
@@ -381,6 +396,7 @@ func (p *NodeExporterProbe) Check(ctx context.Context) ProbeResult {
 			OK:      false,
 			Summary: strings.Join(issues, "; "),
 			Latency: latency,
+			Metrics: m,
 		}
 	}
 	if len(okNotes) == 0 {
@@ -392,6 +408,7 @@ func (p *NodeExporterProbe) Check(ctx context.Context) ProbeResult {
 		OK:      true,
 		Summary: strings.Join(okNotes, ", "),
 		Latency: latency,
+		Metrics: m,
 	}
 }
 
@@ -504,12 +521,19 @@ func (p *WindowsExporterProbe) Check(ctx context.Context) ProbeResult {
 
 	var issues []string
 	var okNotes []string
+	m := &ProbeMetrics{}
 
 	// Evaluate RAM
 	if hasTotal && hasFree && memTotal > 0 {
 		ramPct := (1.0 - memFree/memTotal) * 100.0
 		if ramPct < 0 {
 			ramPct = 0
+		}
+		m.RAMPercent = floatPtr(ramPct)
+		m.RAMTotalMB = memTotal / (1024 * 1024)
+		m.RAMUsedMB = (memTotal - memFree) / (1024 * 1024)
+		if m.RAMUsedMB < 0 {
+			m.RAMUsedMB = 0
 		}
 		if p.maxRAMPercent > 0 && ramPct > p.maxRAMPercent {
 			issues = append(issues, fmt.Sprintf("RAM %.1f%% > %.0f%%", ramPct, p.maxRAMPercent))
@@ -544,6 +568,13 @@ func (p *WindowsExporterProbe) Check(ctx context.Context) ProbeResult {
 		if usedPct < 0 {
 			usedPct = 0
 		}
+		m.Disks = append(m.Disks, DiskMetric{
+			Name:        st.name,
+			Mount:       st.name,
+			UsedPercent: usedPct,
+			UsedGB:      (st.size - st.free) / (1024 * 1024 * 1024),
+			TotalGB:     st.size / (1024 * 1024 * 1024),
+		})
 		if usedPct > maxDiskUsed {
 			maxDiskUsed = usedPct
 			maxDiskName = st.name
@@ -553,6 +584,7 @@ func (p *WindowsExporterProbe) Check(ctx context.Context) ProbeResult {
 		}
 	}
 	if maxDiskUsed >= 0 {
+		m.DiskMaxPct = floatPtr(maxDiskUsed)
 		okNotes = append(okNotes, fmt.Sprintf("Disk %s %.0f%%", maxDiskName, maxDiskUsed))
 	}
 
@@ -562,10 +594,13 @@ func (p *WindowsExporterProbe) Check(ctx context.Context) ProbeResult {
 		key := strings.ToLower(strings.TrimSpace(svc))
 		if !serviceSeen[key] {
 			issues = append(issues, fmt.Sprintf("Service %s not found", svc))
+			m.Services = append(m.Services, ServiceMetric{Name: svc, State: "missing", OK: false})
 		} else if !serviceRunning[key] {
 			issues = append(issues, fmt.Sprintf("Service %s stopped", svc))
+			m.Services = append(m.Services, ServiceMetric{Name: svc, State: "stopped", OK: false})
 		} else {
 			runningSvcCount++
+			m.Services = append(m.Services, ServiceMetric{Name: svc, State: "running", OK: true})
 		}
 	}
 	if len(p.services) > 0 && runningSvcCount == len(p.services) {
@@ -579,6 +614,7 @@ func (p *WindowsExporterProbe) Check(ctx context.Context) ProbeResult {
 			OK:      false,
 			Summary: strings.Join(issues, "; "),
 			Latency: latency,
+			Metrics: m,
 		}
 	}
 	if len(okNotes) == 0 {
@@ -590,5 +626,6 @@ func (p *WindowsExporterProbe) Check(ctx context.Context) ProbeResult {
 		OK:      true,
 		Summary: strings.Join(okNotes, ", "),
 		Latency: latency,
+		Metrics: m,
 	}
 }

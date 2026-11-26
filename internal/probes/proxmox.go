@@ -125,13 +125,14 @@ func (p *ProxmoxProbe) Check(ctx context.Context) ProbeResult {
 		}
 	}
 
-	ok, summary := evaluateProxmoxResources(resources, p.node, p.maxCPUPercent, p.maxRAMPercent, p.maxDiskPercent, p.disks, p.vms)
+	ok, summary, metrics := evaluateProxmoxResourcesDetailed(resources, p.node, p.maxCPUPercent, p.maxRAMPercent, p.maxDiskPercent, p.disks, p.vms)
 	return ProbeResult{
 		ID:      p.id,
 		Kind:    p.Kind(),
 		OK:      ok,
 		Summary: summary,
 		Latency: time.Since(start).Milliseconds(),
+		Metrics: metrics,
 	}
 }
 
@@ -175,6 +176,17 @@ func evaluateProxmoxResources(
 	diskFilter []string,
 	requiredVMs []string,
 ) (bool, string) {
+	ok, summary, _ := evaluateProxmoxResourcesDetailed(resources, nodeFilter, maxCPUPct, maxRAMPct, maxDiskPct, diskFilter, requiredVMs)
+	return ok, summary
+}
+
+func evaluateProxmoxResourcesDetailed(
+	resources []pveResource,
+	nodeFilter string,
+	maxCPUPct, maxRAMPct, maxDiskPct float64,
+	diskFilter []string,
+	requiredVMs []string,
+) (bool, string, *ProbeMetrics) {
 	var (
 		nodes    []pveResource
 		storages []pveResource
@@ -206,7 +218,7 @@ func evaluateProxmoxResources(
 			}
 		}
 		if !anyOffline && !anyMetrics {
-			return false, "Proxmox API connectée, mais ce jeton n'a aucune permission de lecture (CPU/RAM/VM masqués) — dans Proxmox : Centre de données → Permissions → Ajouter → Permission de jeton d'API (Chemin « / », Rôle « PVEAuditor »), ou décochez « Séparation des privilèges »"
+			return false, "Proxmox API connectée, mais ce jeton n'a aucune permission de lecture (CPU/RAM/VM masqués) — dans Proxmox : Centre de données → Permissions → Ajouter → Permission de jeton d'API (Chemin « / », Rôle « PVEAuditor »), ou décochez « Séparation des privilèges »", nil
 		}
 	}
 
@@ -227,10 +239,12 @@ func evaluateProxmoxResources(
 	})
 
 	var issues []string
+	m := &ProbeMetrics{}
 	onlineNodes := 0
 	maxCPU := -1.0
 	maxRAM := -1.0
 	maxRootDisk := -1.0
+	var totalRAMBytes, usedRAMBytes float64
 
 	if nodeFilter != "" && len(nodes) == 0 {
 		issues = append(issues, fmt.Sprintf("Node %s introuvable", nodeFilter))
@@ -245,11 +259,24 @@ func evaluateProxmoxResources(
 			issues = append(issues, fmt.Sprintf("Node %s %s", name, fallbackStr(n.Status, "unknown")))
 		}
 
+		nm := NodeMetric{
+			Name:      name,
+			Status:    fallbackStr(strings.TrimSpace(n.Status), "unknown"),
+			UptimeSec: n.Uptime,
+		}
+		if len(nodes) == 1 {
+			m.Hostname = name
+			if n.Uptime > 0 {
+				m.UptimeSec = n.Uptime
+			}
+		}
+
 		if n.MaxCPU > 0 {
 			cpuPct := n.CPU * 100.0
 			if cpuPct < 0 {
 				cpuPct = 0
 			}
+			nm.CPUPercent = cpuPct
 			if cpuPct > maxCPU {
 				maxCPU = cpuPct
 			}
@@ -263,6 +290,9 @@ func evaluateProxmoxResources(
 			if ramPct < 0 {
 				ramPct = 0
 			}
+			nm.RAMPercent = ramPct
+			usedRAMBytes += n.Mem
+			totalRAMBytes += n.MaxMem
 			if ramPct > maxRAM {
 				maxRAM = ramPct
 			}
@@ -276,6 +306,7 @@ func evaluateProxmoxResources(
 			if rootPct < 0 {
 				rootPct = 0
 			}
+			nm.DiskPercent = rootPct
 			if rootPct > maxRootDisk {
 				maxRootDisk = rootPct
 			}
@@ -283,6 +314,18 @@ func evaluateProxmoxResources(
 				issues = append(issues, fmt.Sprintf("Disque root (%s) %.1f%% > %.0f%%", name, rootPct, maxDiskPct))
 			}
 		}
+		m.Nodes = append(m.Nodes, nm)
+	}
+
+	if maxCPU >= 0 {
+		m.CPUPercent = floatPtr(maxCPU)
+	}
+	if maxRAM >= 0 {
+		m.RAMPercent = floatPtr(maxRAM)
+	}
+	if totalRAMBytes > 0 {
+		m.RAMUsedMB = usedRAMBytes / (1024 * 1024)
+		m.RAMTotalMB = totalRAMBytes / (1024 * 1024)
 	}
 
 	wantedDisks := make(map[string]struct{}, len(diskFilter))
@@ -333,7 +376,21 @@ func evaluateProxmoxResources(
 			if maxDiskPct > 0 && usedPct > maxDiskPct {
 				issues = append(issues, fmt.Sprintf("Stockage %s %.1f%% > %.0f%%", storName, usedPct, maxDiskPct))
 			}
+			m.Disks = append(m.Disks, DiskMetric{
+				Name:        storName,
+				Mount:       s.Node,
+				UsedPercent: usedPct,
+				UsedGB:      s.Disk / (1024 * 1024 * 1024),
+				TotalGB:     s.MaxDisk / (1024 * 1024 * 1024),
+				Status:      fallbackStr(strings.TrimSpace(s.Status), "active"),
+			})
 		}
+	}
+
+	if maxStorPct >= 0 {
+		m.DiskMaxPct = floatPtr(maxStorPct)
+	} else if maxRootDisk >= 0 {
+		m.DiskMaxPct = floatPtr(maxRootDisk)
 	}
 
 	for _, rawWant := range diskFilter {
@@ -361,6 +418,20 @@ func evaluateProxmoxResources(
 		if strings.EqualFold(strings.TrimSpace(g.Status), "running") {
 			runningGuests++
 		}
+		gm := GuestMetric{
+			ID:     strconv.Itoa(g.VMID),
+			Name:   fallbackStr(strings.TrimSpace(g.Name), strconv.Itoa(g.VMID)),
+			Type:   strings.ToLower(strings.TrimSpace(g.Type)),
+			Node:   g.Node,
+			Status: fallbackStr(strings.TrimSpace(g.Status), "unknown"),
+		}
+		if g.MaxCPU > 0 {
+			gm.CPUPercent = floatPtr(g.CPU * 100.0)
+		}
+		if g.MaxMem > 0 {
+			gm.RAMPercent = floatPtr((g.Mem / g.MaxMem) * 100.0)
+		}
+		m.Guests = append(m.Guests, gm)
 	}
 
 	for _, rawWant := range requiredVMs {
@@ -389,7 +460,7 @@ func evaluateProxmoxResources(
 	}
 
 	if len(issues) > 0 {
-		return false, strings.Join(issues, "; ")
+		return false, strings.Join(issues, "; "), m
 	}
 
 	var parts []string
@@ -422,7 +493,7 @@ func evaluateProxmoxResources(
 	if len(parts) == 0 {
 		parts = append(parts, "Proxmox API OK")
 	}
-	return true, strings.Join(parts, ", ")
+	return true, strings.Join(parts, ", "), m
 }
 
 func normalizeProxmoxBaseURL(raw string) string {

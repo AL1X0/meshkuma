@@ -491,6 +491,7 @@ func (m *agentManager) Status() webui.RuntimeStatus {
 		AutoMuteTargets:  append([]string(nil), inst.cfg.AutoMute.Targets...),
 		Relays:           inst.pool.RelayStatuses(),
 		Probes:           probeResults,
+		ProbeMetrics:     inst.scheduler.MetricsSnapshot(),
 		ProbeHistory:     inst.scheduler.HistorySnapshot(),
 		Peers:            peers,
 		Incidents:        incidents,

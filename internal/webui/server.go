@@ -63,6 +63,7 @@ type RuntimeStatus struct {
 	AutoMuteTargets  []string                         `json:"auto_mute_targets"`
 	Relays           []transport.RelayStatus          `json:"relays"`
 	Probes           []probes.ProbeResult             `json:"probes"`
+	ProbeMetrics     map[string]*probes.ProbeMetrics  `json:"probe_metrics,omitempty"`
 	ProbeHistory     map[string][]probes.HistoryPoint `json:"probe_history,omitempty"`
 	Peers            []quorum.PeerStatus              `json:"peers"`
 	Incidents        []probes.IncidentEvent           `json:"incidents,omitempty"`
@@ -280,6 +281,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if st.Probes == nil {
 		st.Probes = []probes.ProbeResult{}
+	}
+	if st.ProbeMetrics == nil {
+		st.ProbeMetrics = map[string]*probes.ProbeMetrics{}
 	}
 	if st.ProbeHistory == nil {
 		st.ProbeHistory = map[string][]probes.HistoryPoint{}
@@ -600,7 +604,13 @@ func (s *Server) handleTestProbe(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	res := built[0].Probe.Check(ctx)
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, struct {
+		probes.ProbeResult
+		Metrics *probes.ProbeMetrics `json:"metrics,omitempty"`
+	}{
+		ProbeResult: res,
+		Metrics:     res.Metrics,
+	})
 }
 
 func (s *Server) handleRunProbes(w http.ResponseWriter, r *http.Request) {

@@ -308,6 +308,10 @@ func (p *SNMPOIDProbe) Check(ctx context.Context) ProbeResult {
 
 	val := vars[0].Value
 	strVal := strings.TrimSpace(snmpValueToString(val))
+	m := &ProbeMetrics{
+		Target:    p.oid,
+		SNMPValue: strVal,
+	}
 
 	if p.expectedValue != "" && strVal != p.expectedValue {
 		return ProbeResult{
@@ -316,6 +320,7 @@ func (p *SNMPOIDProbe) Check(ctx context.Context) ProbeResult {
 			OK:      false,
 			Summary: fmt.Sprintf("OID %s=%q (expected %q)", p.oid, strVal, p.expectedValue),
 			Latency: latency,
+			Metrics: m,
 		}
 	}
 
@@ -328,6 +333,7 @@ func (p *SNMPOIDProbe) Check(ctx context.Context) ProbeResult {
 				OK:      false,
 				Summary: fmt.Sprintf("OID %s=%q is not numeric", p.oid, strVal),
 				Latency: latency,
+				Metrics: m,
 			}
 		}
 		if p.minValue != nil && num < *p.minValue {
@@ -337,6 +343,7 @@ func (p *SNMPOIDProbe) Check(ctx context.Context) ProbeResult {
 				OK:      false,
 				Summary: fmt.Sprintf("OID %s=%.2f (< min %.2f)", p.oid, num, *p.minValue),
 				Latency: latency,
+				Metrics: m,
 			}
 		}
 		if p.maxValue != nil && num > *p.maxValue {
@@ -346,6 +353,7 @@ func (p *SNMPOIDProbe) Check(ctx context.Context) ProbeResult {
 				OK:      false,
 				Summary: fmt.Sprintf("OID %s=%.2f (> max %.2f)", p.oid, num, *p.maxValue),
 				Latency: latency,
+				Metrics: m,
 			}
 		}
 	}
@@ -356,5 +364,6 @@ func (p *SNMPOIDProbe) Check(ctx context.Context) ProbeResult {
 		OK:      true,
 		Summary: fmt.Sprintf("OID %s=%s OK", p.oid, strVal),
 		Latency: latency,
+		Metrics: m,
 	}
 }

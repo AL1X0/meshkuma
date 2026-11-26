@@ -38,6 +38,7 @@ func (p *TCPProbe) Check(ctx context.Context) ProbeResult {
 			OK:      false,
 			Summary: fmt.Sprintf("TCP %s failed: %v", p.address, err),
 			Latency: latency,
+			Metrics: &ProbeMetrics{Target: p.address},
 		}
 	}
 	_ = conn.Close()
@@ -47,5 +48,6 @@ func (p *TCPProbe) Check(ctx context.Context) ProbeResult {
 		OK:      true,
 		Summary: fmt.Sprintf("TCP %s OK (%dms)", p.address, latency),
 		Latency: latency,
+		Metrics: &ProbeMetrics{Target: p.address},
 	}
 }

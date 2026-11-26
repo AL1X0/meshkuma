@@ -117,9 +117,10 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 	}
 
 	var (
-		total  int
-		up     int
-		issues []string
+		total        int
+		up           int
+		issues       []string
+		containerMetrics []ContainerMetric
 	)
 
 	if len(p.containers) > 0 {
@@ -140,9 +141,17 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 			c, found := byName[target]
 			if !found {
 				issues = append(issues, fmt.Sprintf("%s (missing)", target))
+				containerMetrics = append(containerMetrics, ContainerMetric{
+					Name:   target,
+					State:  "missing",
+					Status: "missing",
+					OK:     false,
+				})
 				continue
 			}
-			if issue := p.evaluateContainer(ctx, target, c); issue != "" {
+			issue, cm := p.evaluateContainer(ctx, target, c)
+			containerMetrics = append(containerMetrics, cm)
+			if issue != "" {
 				issues = append(issues, issue)
 			} else {
 				up++
@@ -161,7 +170,9 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 		for _, c := range matched {
 			total++
 			name := containerDisplayName(c)
-			if issue := p.evaluateContainer(ctx, name, c); issue != "" {
+			issue, cm := p.evaluateContainer(ctx, name, c)
+			containerMetrics = append(containerMetrics, cm)
+			if issue != "" {
 				issues = append(issues, issue)
 			} else {
 				up++
@@ -169,6 +180,7 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 		}
 	}
 
+	m := &ProbeMetrics{Containers: containerMetrics}
 	latency = time.Since(start).Milliseconds()
 	if len(issues) > 0 {
 		return ProbeResult{
@@ -177,6 +189,7 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 			OK:      false,
 			Summary: fmt.Sprintf("%d/%d up; %s", up, total, strings.Join(issues, ", ")),
 			Latency: latency,
+			Metrics: m,
 		}
 	}
 	if total == 0 {
@@ -186,6 +199,7 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 			OK:      true,
 			Summary: "0/0 monitored",
 			Latency: latency,
+			Metrics: m,
 		}
 	}
 	return ProbeResult{
@@ -194,6 +208,7 @@ func (p *DockerProbe) Check(ctx context.Context) ProbeResult {
 		OK:      true,
 		Summary: fmt.Sprintf("%d/%d up", up, total),
 		Latency: latency,
+		Metrics: m,
 	}
 }
 
@@ -211,27 +226,53 @@ func (p *DockerProbe) matchesLabel(labels map[string]string) bool {
 	return true
 }
 
-func (p *DockerProbe) evaluateContainer(ctx context.Context, name string, c dockerContainerSummary) string {
+func (p *DockerProbe) evaluateContainer(ctx context.Context, name string, c dockerContainerSummary) (string, ContainerMetric) {
 	state := strings.ToLower(strings.TrimSpace(c.State))
-	if state != "running" {
-		return fmt.Sprintf("%s (%s)", name, state)
+	health := ""
+	lowStatus := strings.ToLower(c.Status)
+	switch {
+	case strings.Contains(lowStatus, "(healthy)"):
+		health = "healthy"
+	case strings.Contains(lowStatus, "(unhealthy)"):
+		health = "unhealthy"
+	case strings.Contains(lowStatus, "(health: starting)"):
+		health = "starting"
 	}
-	if strings.Contains(strings.ToLower(c.Status), "(unhealthy)") {
-		return fmt.Sprintf("%s (unhealthy)", name)
+	cm := ContainerMetric{
+		Name:   name,
+		State:  state,
+		Status: c.Status,
+		Health: health,
+		OK:     true,
+	}
+	if state != "running" {
+		cm.OK = false
+		return fmt.Sprintf("%s (%s)", name, state), cm
+	}
+	if health == "unhealthy" {
+		cm.OK = false
+		return fmt.Sprintf("%s (unhealthy)", name), cm
 	}
 	if p.maxRestarts > 0 {
 		insp, err := p.inspectContainer(ctx, c.ID)
 		if err != nil {
-			return fmt.Sprintf("%s (inspect err: %v)", name, err)
+			cm.OK = false
+			return fmt.Sprintf("%s (inspect err: %v)", name, err), cm
 		}
-		if insp.State.Health != nil && strings.EqualFold(insp.State.Health.Status, "unhealthy") {
-			return fmt.Sprintf("%s (unhealthy)", name)
+		cm.Restarts = insp.RestartCount
+		if insp.State.Health != nil && strings.TrimSpace(insp.State.Health.Status) != "" {
+			cm.Health = strings.ToLower(strings.TrimSpace(insp.State.Health.Status))
+		}
+		if cm.Health == "unhealthy" {
+			cm.OK = false
+			return fmt.Sprintf("%s (unhealthy)", name), cm
 		}
 		if insp.RestartCount > p.maxRestarts {
-			return fmt.Sprintf("%s (restarts=%d > %d)", name, insp.RestartCount, p.maxRestarts)
+			cm.OK = false
+			return fmt.Sprintf("%s (restarts=%d > %d)", name, insp.RestartCount, p.maxRestarts), cm
 		}
 	}
-	return ""
+	return "", cm
 }
 
 func (p *DockerProbe) listContainers(ctx context.Context) ([]dockerContainerSummary, error) {

@@ -89,17 +89,23 @@ func (p *SynologyProbe) Check(ctx context.Context) ProbeResult {
 	}
 
 	latency := time.Since(start).Milliseconds()
-	ok, summary := evaluateSynologyMetrics(scalars, raidVars, diskVars, p.maxTempC)
+	ok, summary, metrics := evaluateSynologyMetricsDetailed(scalars, raidVars, diskVars, p.maxTempC)
 	return ProbeResult{
 		ID:      p.id,
 		Kind:    p.Kind(),
 		OK:      ok,
 		Summary: summary,
 		Latency: latency,
+		Metrics: metrics,
 	}
 }
 
 func evaluateSynologyMetrics(scalars, raidVars, diskVars []SNMPVariable, maxTempC int) (bool, string) {
+	ok, summary, _ := evaluateSynologyMetricsDetailed(scalars, raidVars, diskVars, maxTempC)
+	return ok, summary
+}
+
+func evaluateSynologyMetricsDetailed(scalars, raidVars, diskVars []SNMPVariable, maxTempC int) (bool, string, *ProbeMetrics) {
 	byOID := make(map[string]any, len(scalars))
 	for _, v := range scalars {
 		byOID[normalizeOID(v.OID)] = v.Value
@@ -107,60 +113,91 @@ func evaluateSynologyMetrics(scalars, raidVars, diskVars []SNMPVariable, maxTemp
 
 	var issues []string
 	tempStr := ""
+	m := &ProbeMetrics{
+		MaxTempC: float64(maxTempC),
+	}
 
 	// System status (1 = Normal, 2 = Failed)
 	if raw, ok := byOID[synoOIDSystemStatus]; ok {
 		if st, valid := snmpValueToInt64(raw); !valid || st != 1 {
 			issues = append(issues, fmt.Sprintf("System failed (status=%v)", raw))
+			m.Sensors = append(m.Sensors, SensorMetric{Group: "Système", Name: "État général", Value: fmt.Sprintf("Erreur (%v)", raw), OK: false})
+		} else {
+			m.Sensors = append(m.Sensors, SensorMetric{Group: "Système", Name: "État général", Value: "Normal", OK: true})
 		}
 	} else {
 		issues = append(issues, "missing system status OID")
+		m.Sensors = append(m.Sensors, SensorMetric{Group: "Système", Name: "État général", Value: "Manquant", OK: false})
 	}
 
 	// System temperature
 	if raw, ok := byOID[synoOIDTemperature]; ok {
 		if temp, valid := snmpValueToInt64(raw); valid {
 			tempStr = fmt.Sprintf("%d°C", temp)
-			if int(temp) > maxTempC {
+			m.TempC = floatPtr(float64(temp))
+			tempOK := int(temp) <= maxTempC
+			if !tempOK {
 				issues = append(issues, fmt.Sprintf("Temp %d°C > %d°C", temp, maxTempC))
 			}
+			m.Sensors = append(m.Sensors, SensorMetric{Group: "Thermique", Name: "Température", Value: tempStr, OK: tempOK})
 		} else {
 			issues = append(issues, fmt.Sprintf("invalid temperature value %v", raw))
+			m.Sensors = append(m.Sensors, SensorMetric{Group: "Thermique", Name: "Température", Value: fmt.Sprintf("%v", raw), OK: false})
 		}
 	}
 
 	// Fans (1 = Normal, 2 = Failed)
 	if raw, ok := byOID[synoOIDSystemFan]; ok {
-		if st, valid := snmpValueToInt64(raw); !valid || st != 1 {
+		st, valid := snmpValueToInt64(raw)
+		fanOK := valid && st == 1
+		if !fanOK {
 			issues = append(issues, fmt.Sprintf("System fan failed (status=%v)", raw))
 		}
+		val := "Normal"
+		if !fanOK {
+			val = fmt.Sprintf("Erreur (%v)", raw)
+		}
+		m.Sensors = append(m.Sensors, SensorMetric{Group: "Ventilation", Name: "Ventilateur système", Value: val, OK: fanOK})
 	}
 	if raw, ok := byOID[synoOIDPowerFan]; ok {
-		if st, valid := snmpValueToInt64(raw); !valid || st != 1 {
+		st, valid := snmpValueToInt64(raw)
+		fanOK := valid && st == 1
+		if !fanOK {
 			issues = append(issues, fmt.Sprintf("Power fan failed (status=%v)", raw))
 		}
+		val := "Normal"
+		if !fanOK {
+			val = fmt.Sprintf("Erreur (%v)", raw)
+		}
+		m.Sensors = append(m.Sensors, SensorMetric{Group: "Ventilation", Name: "Ventilateur alim", Value: val, OK: fanOK})
 	}
 
 	// RAID statuses (1 = Normal)
 	raidCount := len(raidVars)
 	for idx, rv := range raidVars {
 		st, valid := snmpValueToInt64(rv.Value)
-		if !valid || st != 1 {
-			issues = append(issues, fmt.Sprintf("RAID#%d %s (%v)", idx+1, synologyRAIDLabel(st), rv.Value))
+		label := synologyRAIDLabel(st)
+		raidOK := valid && st == 1
+		if !raidOK {
+			issues = append(issues, fmt.Sprintf("RAID#%d %s (%v)", idx+1, label, rv.Value))
 		}
+		m.Sensors = append(m.Sensors, SensorMetric{Group: "RAID", Name: fmt.Sprintf("Volume %d", idx+1), Value: label, OK: raidOK})
 	}
 
 	// Disk statuses (1 = Normal)
 	diskCount := len(diskVars)
 	for idx, dv := range diskVars {
 		st, valid := snmpValueToInt64(dv.Value)
-		if !valid || st != 1 {
-			issues = append(issues, fmt.Sprintf("Disk#%d %s (%v)", idx+1, synologyDiskLabel(st), dv.Value))
+		label := synologyDiskLabel(st)
+		diskOK := valid && st == 1
+		if !diskOK {
+			issues = append(issues, fmt.Sprintf("Disk#%d %s (%v)", idx+1, label, dv.Value))
 		}
+		m.Sensors = append(m.Sensors, SensorMetric{Group: "Disques", Name: fmt.Sprintf("Disque %d", idx+1), Value: label, OK: diskOK})
 	}
 
 	if len(issues) > 0 {
-		return false, strings.Join(issues, "; ")
+		return false, strings.Join(issues, "; "), m
 	}
 
 	var parts []string
@@ -175,7 +212,7 @@ func evaluateSynologyMetrics(scalars, raidVars, diskVars []SNMPVariable, maxTemp
 	if tempStr != "" {
 		parts = append(parts, tempStr)
 	}
-	return true, strings.Join(parts, ", ")
+	return true, strings.Join(parts, ", "), m
 }
 
 func normalizeOID(oid string) string {

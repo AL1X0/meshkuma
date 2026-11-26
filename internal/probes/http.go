@@ -105,11 +105,19 @@ func (p *HTTPProbe) Check(ctx context.Context) ProbeResult {
 		issues = append(issues, fmt.Sprintf("body missing %q", p.contains))
 	}
 
+	m := &ProbeMetrics{
+		Target:     p.url,
+		HTTPStatus: resp.StatusCode,
+	}
+
 	tlsNote := ""
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		leaf := resp.TLS.PeerCertificates[0]
 		remaining := leaf.NotAfter.Sub(p.now())
 		daysLeft := int(remaining.Hours() / 24)
+		m.TLSDays = intPtr(daysLeft)
+		m.TLSExpiry = leaf.NotAfter.UTC().Format("2006-01-02")
+		m.TLSSubject = leaf.Subject.CommonName
 		tlsNote = fmt.Sprintf(", TLS %dd", daysLeft)
 		if p.tlsMinDays > 0 {
 			if remaining <= 0 {
@@ -127,6 +135,7 @@ func (p *HTTPProbe) Check(ctx context.Context) ProbeResult {
 			OK:      false,
 			Summary: strings.Join(issues, "; "),
 			Latency: latency,
+			Metrics: m,
 		}
 	}
 
@@ -136,5 +145,6 @@ func (p *HTTPProbe) Check(ctx context.Context) ProbeResult {
 		OK:      true,
 		Summary: fmt.Sprintf("HTTP %d (%dms%s)", resp.StatusCode, latency, tlsNote),
 		Latency: latency,
+		Metrics: m,
 	}
 }

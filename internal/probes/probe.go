@@ -12,18 +12,23 @@ import (
 
 // ProbeResult represents the outcome of a single local probe execution.
 type ProbeResult struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	OK      bool   `json:"ok"`
-	Summary string `json:"summary"`
-	Latency int64  `json:"latency_ms,omitempty"`
+	ID      string        `json:"id"`
+	Kind    string        `json:"kind"`
+	OK      bool          `json:"ok"`
+	Summary string        `json:"summary"`
+	Latency int64         `json:"latency_ms,omitempty"`
+	Metrics *ProbeMetrics `json:"-"`
 }
 
-// HistoryPoint records one check sample for the built-in availability history bar.
+// HistoryPoint records one check sample for the built-in availability history bar and graphs.
 type HistoryPoint struct {
-	TS        int64 `json:"ts"`
-	OK        bool  `json:"ok"`
-	LatencyMs int64 `json:"latency_ms,omitempty"`
+	TS        int64    `json:"ts"`
+	OK        bool     `json:"ok"`
+	LatencyMs int64    `json:"latency_ms,omitempty"`
+	CPUPct    *float64 `json:"cpu,omitempty"`
+	RAMPct    *float64 `json:"ram,omitempty"`
+	DiskPct   *float64 `json:"disk,omitempty"`
+	TempC     *float64 `json:"temp,omitempty"`
 }
 
 // IncidentEvent records a state transition (outage or recovery) for the built-in activity timeline.
@@ -36,7 +41,7 @@ type IncidentEvent struct {
 }
 
 const (
-	maxHistoryPoints  = 36
+	maxHistoryPoints  = 60
 	maxIncidentEvents = 40
 )
 
@@ -62,6 +67,7 @@ type Scheduler struct {
 
 	mu        sync.RWMutex
 	results   map[string]ProbeResult
+	metrics   map[string]*ProbeMetrics
 	history   map[string][]HistoryPoint
 	incidents []IncidentEvent
 	ready     chan struct{}
@@ -83,6 +89,7 @@ func NewScheduler(scheduled []ScheduledProbe, logger *slog.Logger) *Scheduler {
 		probes:  copied,
 		logger:  logger,
 		results: make(map[string]ProbeResult, len(copied)),
+		metrics: make(map[string]*ProbeMetrics, len(copied)),
 		history: make(map[string][]HistoryPoint, len(copied)),
 		ready:   make(chan struct{}),
 	}
@@ -248,6 +255,20 @@ func (s *Scheduler) HistorySnapshot() map[string][]HistoryPoint {
 	return out
 }
 
+// MetricsSnapshot returns the latest structured telemetry snapshot for each probe.
+func (s *Scheduler) MetricsSnapshot() map[string]*ProbeMetrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[string]*ProbeMetrics, len(s.metrics))
+	for id, m := range s.metrics {
+		if m != nil {
+			out[id] = m
+		}
+	}
+	return out
+}
+
 // Incidents returns recent local probe state transitions (newest first).
 func (s *Scheduler) Incidents() []IncidentEvent {
 	s.mu.RLock()
@@ -305,12 +326,25 @@ func (s *Scheduler) execOnce(ctx context.Context, p Probe, timeout time.Duration
 	s.mu.Lock()
 	prev, existed := s.results[res.ID]
 	s.results[res.ID] = res
+	if res.Metrics != nil {
+		s.metrics[res.ID] = res.Metrics
+	} else {
+		delete(s.metrics, res.ID)
+	}
 
-	pts := append(s.history[res.ID], HistoryPoint{
+	pt := HistoryPoint{
 		TS:        nowUnix,
 		OK:        res.OK,
 		LatencyMs: res.Latency,
-	})
+	}
+	if res.Metrics != nil {
+		pt.CPUPct = res.Metrics.CPUPercent
+		pt.RAMPct = res.Metrics.RAMPercent
+		pt.DiskPct = res.Metrics.DiskMaxPct
+		pt.TempC = res.Metrics.TempC
+	}
+
+	pts := append(s.history[res.ID], pt)
 	if len(pts) > maxHistoryPoints {
 		pts = pts[len(pts)-maxHistoryPoints:]
 	}

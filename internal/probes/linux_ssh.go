@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -86,7 +88,7 @@ func (p *LinuxSSHProbe) Check(ctx context.Context) ProbeResult {
 		}
 	}
 
-	ok, summary := evaluateLinuxSSHOutput(
+	ok, summary, metrics := evaluateLinuxSSHOutputDetailed(
 		output,
 		p.maxCPUPercent,
 		p.maxRAMPercent,
@@ -101,6 +103,7 @@ func (p *LinuxSSHProbe) Check(ctx context.Context) ProbeResult {
 		OK:      ok,
 		Summary: summary,
 		Latency: time.Since(start).Milliseconds(),
+		Metrics: metrics,
 	}
 }
 
@@ -236,6 +239,8 @@ func shellSingleQuote(s string) string {
 func buildLinuxProbeCommand(services []string) string {
 	var b strings.Builder
 	b.WriteString(`printf 'HOST=%s\n' "$(hostname 2>/dev/null || uname -n 2>/dev/null || cat /etc/hostname 2>/dev/null)"; `)
+	b.WriteString(`printf 'LOAD=%s\n' "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"; `)
+	b.WriteString(`printf 'UPTIME=%s\n' "$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"; `)
 	b.WriteString(`head -n 1 /proc/stat 2>/dev/null | sed 's/^/STAT1=/'; `)
 	b.WriteString(`sleep 0.25 2>/dev/null || sleep 1; `)
 	b.WriteString(`head -n 1 /proc/stat 2>/dev/null | sed 's/^/STAT2=/'; `)
@@ -257,6 +262,7 @@ type linuxDiskEntry struct {
 	device  string
 	fsType  string
 	blocks  float64
+	usedKB  float64
 	usedPct float64
 	mount   string
 }
@@ -271,13 +277,27 @@ func evaluateLinuxSSHOutput(
 	diskFilter, requiredServices []string,
 	fallbackHost string,
 ) (bool, string) {
+	ok, summary, _ := evaluateLinuxSSHOutputDetailed(
+		rawOutput, maxCPUPct, maxRAMPct, maxDiskPct, diskFilter, requiredServices, fallbackHost,
+	)
+	return ok, summary
+}
+
+func evaluateLinuxSSHOutputDetailed(
+	rawOutput string,
+	maxCPUPct, maxRAMPct, maxDiskPct float64,
+	diskFilter, requiredServices []string,
+	fallbackHost string,
+) (bool, string, *ProbeMetrics) {
 	var (
-		hostName = strings.TrimSpace(fallbackHost)
-		stat1    string
-		stat2    string
-		memKB    = make(map[string]float64)
-		disks    []linuxDiskEntry
-		svcState = make(map[string]string)
+		hostName  = strings.TrimSpace(fallbackHost)
+		loadAvg   string
+		uptimeSec int64
+		stat1     string
+		stat2     string
+		memKB     = make(map[string]float64)
+		disks     []linuxDiskEntry
+		svcState  = make(map[string]string)
 	)
 
 	for _, line := range strings.Split(strings.ReplaceAll(rawOutput, "\r\n", "\n"), "\n") {
@@ -286,6 +306,12 @@ func evaluateLinuxSSHOutput(
 		case strings.HasPrefix(line, "HOST="):
 			if v := strings.TrimSpace(strings.TrimPrefix(line, "HOST=")); v != "" {
 				hostName = v
+			}
+		case strings.HasPrefix(line, "LOAD="):
+			loadAvg = strings.TrimSpace(strings.TrimPrefix(line, "LOAD="))
+		case strings.HasPrefix(line, "UPTIME="):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, "UPTIME=")), 64); err == nil && v >= 0 {
+				uptimeSec = int64(math.Round(v))
 			}
 		case strings.HasPrefix(line, "STAT1="):
 			stat1 = strings.TrimSpace(strings.TrimPrefix(line, "STAT1="))
@@ -315,14 +341,36 @@ func evaluateLinuxSSHOutput(
 		hostName = "Linux"
 	}
 
+	m := &ProbeMetrics{
+		Hostname:  hostName,
+		LoadAvg:   loadAvg,
+		UptimeSec: uptimeSec,
+	}
 	var issues []string
 
 	cpuPct, cpuOK := computeProcStatCPU(stat1, stat2)
+	if cpuOK {
+		m.CPUPercent = floatPtr(cpuPct)
+	}
 	if maxCPUPct > 0 && cpuOK && cpuPct > maxCPUPct {
 		issues = append(issues, fmt.Sprintf("CPU %.1f%% > %.0f%%", cpuPct, maxCPUPct))
 	}
 
 	ramPct, ramOK := computeMeminfoRAM(memKB)
+	if ramOK {
+		total := memKB["MemTotal"]
+		avail, hasAvail := memKB["MemAvailable"]
+		if !hasAvail {
+			avail = memKB["MemFree"] + memKB["Buffers"] + memKB["Cached"] + memKB["SReclaimable"]
+		}
+		used := total - avail
+		if used < 0 {
+			used = 0
+		}
+		m.RAMPercent = floatPtr(ramPct)
+		m.RAMTotalMB = total / 1024.0
+		m.RAMUsedMB = used / 1024.0
+	}
 	if maxRAMPct > 0 && ramOK && ramPct > maxRAMPct {
 		issues = append(issues, fmt.Sprintf("RAM %.1f%% > %.0f%%", ramPct, maxRAMPct))
 	}
@@ -340,8 +388,8 @@ func evaluateLinuxSSHOutput(
 
 	wantedDisks := make(map[string]struct{}, len(diskFilter))
 	for _, rawD := range diskFilter {
-		if m := strings.TrimSpace(rawD); m != "" {
-			wantedDisks[m] = struct{}{}
+		if mnt := strings.TrimSpace(rawD); mnt != "" {
+			wantedDisks[mnt] = struct{}{}
 		}
 	}
 	seenDisks := make(map[string]bool)
@@ -366,16 +414,33 @@ func evaluateLinuxSSHOutput(
 			}
 		}
 	}
+	sort.Slice(filteredDisks, func(i, j int) bool {
+		return filteredDisks[i].mount < filteredDisks[j].mount
+	})
 
 	for _, d := range filteredDisks {
 		seenDisks[d.mount] = true
+		diskStatus := "OK"
+		if maxDiskPct > 0 && d.usedPct > maxDiskPct {
+			diskStatus = "Saturé"
+			issues = append(issues, fmt.Sprintf("Disque %s %.1f%% > %.0f%%", d.mount, d.usedPct, maxDiskPct))
+		}
+		m.Disks = append(m.Disks, DiskMetric{
+			Name:        d.mount,
+			Mount:       d.mount,
+			FSType:      d.fsType,
+			UsedPercent: d.usedPct,
+			UsedGB:      d.usedKB / (1024 * 1024),
+			TotalGB:     d.blocks / (1024 * 1024),
+			Status:      diskStatus,
+		})
 		if d.usedPct > maxDisk {
 			maxDisk = d.usedPct
 			maxDiskMount = d.mount
 		}
-		if maxDiskPct > 0 && d.usedPct > maxDiskPct {
-			issues = append(issues, fmt.Sprintf("Disque %s %.1f%% > %.0f%%", d.mount, d.usedPct, maxDiskPct))
-		}
+	}
+	if maxDisk >= 0 {
+		m.DiskMaxPct = floatPtr(maxDisk)
 	}
 	for _, rawWant := range diskFilter {
 		want := strings.TrimSpace(rawWant)
@@ -393,17 +458,20 @@ func evaluateLinuxSSHOutput(
 		st, ok := svcState[strings.ToLower(want)]
 		if !ok {
 			issues = append(issues, fmt.Sprintf("Service %s introuvable", want))
+			m.Services = append(m.Services, ServiceMetric{Name: want, State: "introuvable", OK: false})
 			continue
 		}
 		if !strings.EqualFold(st, "active") {
 			issues = append(issues, fmt.Sprintf("Service %s (%s)", want, fallbackStr(st, "inactive")))
+			m.Services = append(m.Services, ServiceMetric{Name: want, State: fallbackStr(st, "inactive"), OK: false})
 			continue
 		}
 		okSvc++
+		m.Services = append(m.Services, ServiceMetric{Name: want, State: st, OK: true})
 	}
 
 	if len(issues) > 0 {
-		return false, strings.Join(issues, "; ")
+		return false, strings.Join(issues, "; "), m
 	}
 
 	parts := []string{hostName}
@@ -420,9 +488,9 @@ func evaluateLinuxSSHOutput(
 		parts = append(parts, fmt.Sprintf("%d/%d services OK", okSvc, countNonEmpty(requiredServices)))
 	}
 	if len(parts) == 1 && !cpuOK && !ramOK && maxDisk < 0 {
-		return false, "SSH connecté mais impossible de lire /proc ou df"
+		return false, "SSH connecté mais impossible de lire /proc ou df", m
 	}
-	return true, strings.Join(parts, ", ")
+	return true, strings.Join(parts, ", "), m
 }
 
 func computeProcStatCPU(stat1, stat2 string) (float64, bool) {
@@ -537,6 +605,7 @@ func parseLinuxDFLine(line string) (linuxDiskEntry, bool) {
 		device:  strings.TrimSpace(fields[0]),
 		fsType:  fsType,
 		blocks:  blocks,
+		usedKB:  used,
 		usedPct: usedPct,
 		mount:   mount,
 	}, true

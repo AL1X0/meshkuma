@@ -107,7 +107,7 @@ func (p *WindowsWinRMProbe) Check(ctx context.Context) ProbeResult {
 		query = sess.queryWQL
 	}
 
-	ok, summary, err := p.collectAndEvaluate(ctx, query)
+	ok, summary, metrics, err := p.collectAndEvaluate(ctx, query)
 	if err != nil {
 		return ProbeResult{
 			ID:      p.id,
@@ -123,33 +123,34 @@ func (p *WindowsWinRMProbe) Check(ctx context.Context) ProbeResult {
 		OK:      ok,
 		Summary: summary,
 		Latency: time.Since(start).Milliseconds(),
+		Metrics: metrics,
 	}
 }
 
 func (p *WindowsWinRMProbe) collectAndEvaluate(
 	ctx context.Context,
 	query func(ctx context.Context, namespace, wql string) ([]map[string]string, error),
-) (bool, string, error) {
+) (bool, string, *ProbeMetrics, error) {
 	osRows, err := query(ctx, "root/cimv2", "SELECT Caption, CSName, TotalVisibleMemorySize, FreePhysicalMemory FROM Win32_OperatingSystem")
 	if err != nil {
-		return false, "", err
+		return false, "", nil, err
 	}
 
 	cpuRows, err := query(ctx, "root/cimv2", "SELECT LoadPercentage FROM Win32_Processor")
 	if err != nil {
-		return false, "", err
+		return false, "", nil, err
 	}
 
 	diskRows, err := query(ctx, "root/cimv2", "SELECT DeviceID, Size, FreeSpace FROM Win32_LogicalDisk WHERE DriveType=3")
 	if err != nil {
-		return false, "", err
+		return false, "", nil, err
 	}
 
 	var svcRows []map[string]string
 	if len(p.services) > 0 {
 		svcRows, err = query(ctx, "root/cimv2", "SELECT Name, State FROM Win32_Service")
 		if err != nil {
-			return false, "", err
+			return false, "", nil, err
 		}
 	}
 
@@ -160,11 +161,11 @@ func (p *WindowsWinRMProbe) collectAndEvaluate(
 		if errors.Is(hvErr, errWMIInvalidNamespace) {
 			hyperVUnavailable = true
 		} else if len(p.vms) > 0 {
-			return false, "", hvErr
+			return false, "", nil, hvErr
 		}
 	}
 
-	ok, summary := evaluateWindowsSnapshot(
+	ok, summary, metrics := evaluateWindowsSnapshotDetailed(
 		osRows,
 		cpuRows,
 		diskRows,
@@ -179,7 +180,7 @@ func (p *WindowsWinRMProbe) collectAndEvaluate(
 		p.vms,
 		p.host,
 	)
-	return ok, summary, nil
+	return ok, summary, metrics, nil
 }
 
 func evaluateWindowsSnapshot(
@@ -189,7 +190,22 @@ func evaluateWindowsSnapshot(
 	diskFilter, requiredServices, requiredVMs []string,
 	fallbackHost string,
 ) (bool, string) {
+	ok, summary, _ := evaluateWindowsSnapshotDetailed(
+		osRows, cpuRows, diskRows, svcRows, hvRows, hyperVUnavailable,
+		maxCPUPct, maxRAMPct, maxDiskPct, diskFilter, requiredServices, requiredVMs, fallbackHost,
+	)
+	return ok, summary
+}
+
+func evaluateWindowsSnapshotDetailed(
+	osRows, cpuRows, diskRows, svcRows, hvRows []map[string]string,
+	hyperVUnavailable bool,
+	maxCPUPct, maxRAMPct, maxDiskPct float64,
+	diskFilter, requiredServices, requiredVMs []string,
+	fallbackHost string,
+) (bool, string, *ProbeMetrics) {
 	var issues []string
+	m := &ProbeMetrics{}
 
 	hostName := strings.TrimSpace(fallbackHost)
 	ramPct := -1.0
@@ -197,6 +213,7 @@ func evaluateWindowsSnapshot(
 		if cs := strings.TrimSpace(osRows[0]["csname"]); cs != "" {
 			hostName = cs
 		}
+		m.OS = strings.TrimSpace(osRows[0]["caption"])
 		totalKB, tOK := parseWMIUint(osRows[0]["totalvisiblememorysize"])
 		freeKB, fOK := parseWMIUint(osRows[0]["freephysicalmemory"])
 		if tOK && fOK && totalKB > 0 {
@@ -205,11 +222,15 @@ func evaluateWindowsSnapshot(
 				usedKB = totalKB - freeKB
 			}
 			ramPct = (usedKB / totalKB) * 100.0
+			m.RAMPercent = floatPtr(ramPct)
+			m.RAMUsedMB = usedKB / 1024.0
+			m.RAMTotalMB = totalKB / 1024.0
 		}
 	}
 	if hostName == "" {
 		hostName = "Windows"
 	}
+	m.Hostname = hostName
 
 	cpuPct := -1.0
 	var cpuSum float64
@@ -228,6 +249,7 @@ func evaluateWindowsSnapshot(
 	}
 	if cpuCount > 0 {
 		cpuPct = cpuSum / float64(cpuCount)
+		m.CPUPercent = floatPtr(cpuPct)
 	}
 
 	if maxCPUPct > 0 && cpuPct >= 0 && cpuPct > maxCPUPct {
@@ -272,13 +294,26 @@ func evaluateWindowsSnapshot(
 			usedBytes = sizeBytes - freeBytes
 		}
 		usedPct := (usedBytes / sizeBytes) * 100.0
+		diskStatus := "OK"
+		if maxDiskPct > 0 && usedPct > maxDiskPct {
+			diskStatus = "Saturé"
+			issues = append(issues, fmt.Sprintf("Disque %s %.1f%% > %.0f%%", dev, usedPct, maxDiskPct))
+		}
+		m.Disks = append(m.Disks, DiskMetric{
+			Name:        dev,
+			Mount:       dev,
+			UsedPercent: usedPct,
+			UsedGB:      usedBytes / (1024 * 1024 * 1024),
+			TotalGB:     sizeBytes / (1024 * 1024 * 1024),
+			Status:      diskStatus,
+		})
 		if usedPct > maxDisk {
 			maxDisk = usedPct
 			maxDiskName = dev
 		}
-		if maxDiskPct > 0 && usedPct > maxDiskPct {
-			issues = append(issues, fmt.Sprintf("Disque %s %.1f%% > %.0f%%", dev, usedPct, maxDiskPct))
-		}
+	}
+	if maxDisk >= 0 {
+		m.DiskMaxPct = floatPtr(maxDisk)
 	}
 	for _, rawWant := range diskFilter {
 		norm := normalizeDriveLetter(rawWant)
@@ -303,13 +338,16 @@ func evaluateWindowsSnapshot(
 		st, found := svcStates[strings.ToLower(want)]
 		if !found {
 			issues = append(issues, fmt.Sprintf("Service %s introuvable", want))
+			m.Services = append(m.Services, ServiceMetric{Name: want, State: "introuvable", OK: false})
 			continue
 		}
 		if !strings.EqualFold(st, "Running") {
 			issues = append(issues, fmt.Sprintf("Service %s (%s)", want, fallbackStr(st, "stopped")))
+			m.Services = append(m.Services, ServiceMetric{Name: want, State: fallbackStr(st, "stopped"), OK: false})
 			continue
 		}
 		okSvc++
+		m.Services = append(m.Services, ServiceMetric{Name: want, State: st, OK: true})
 	}
 
 	// Hyper-V VMs (Msvm_ComputerSystem: VM rows have a GUID in Name; the host row has the machine name).
@@ -341,6 +379,13 @@ func evaluateWindowsSnapshot(
 		if vm.enabledState == "2" {
 			runningVMs++
 		}
+		m.Guests = append(m.Guests, GuestMetric{
+			ID:     vm.guid,
+			Name:   vm.name,
+			Type:   "hyper-v",
+			Status: hyperVStateLabel(vm.enabledState),
+			Health: hyperVHealthLabel(vm.healthState),
+		})
 	}
 
 	if hyperVUnavailable {
@@ -375,7 +420,7 @@ func evaluateWindowsSnapshot(
 	}
 
 	if len(issues) > 0 {
-		return false, strings.Join(issues, "; ")
+		return false, strings.Join(issues, "; "), m
 	}
 
 	parts := []string{hostName}
@@ -394,7 +439,20 @@ func evaluateWindowsSnapshot(
 	if len(requiredServices) > 0 {
 		parts = append(parts, fmt.Sprintf("%d/%d services OK", okSvc, countNonEmpty(requiredServices)))
 	}
-	return true, strings.Join(parts, ", ")
+	return true, strings.Join(parts, ", "), m
+}
+
+func hyperVHealthLabel(code string) string {
+	switch strings.TrimSpace(code) {
+	case "5":
+		return "sain"
+	case "20":
+		return "majeur"
+	case "25":
+		return "critique"
+	default:
+		return strings.TrimSpace(code)
+	}
 }
 
 func hyperVStateLabel(code string) string {

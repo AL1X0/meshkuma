@@ -1068,3 +1068,77 @@ func TestLinuxSSHProbe(t *testing.T) {
 		t.Fatalf("expected French SSH auth error, got %+v", resErr)
 	}
 }
+
+func TestProbeMetricsAndSchedulerHistory(t *testing.T) {
+	// Verify WindowsWinRMProbe structured metrics + Hyper-V guests
+	pWin := NewWindowsWinRMProbe(config.ProbeConfig{
+		ID:       "win-metrics",
+		Host:     "192.168.1.40",
+		User:     "Administrator",
+		Password: "pw",
+		Services: []string{"W32Time"},
+	})
+	pWin.queryFn = func(_ context.Context, ns, wql string) ([]map[string]string, error) {
+		switch {
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_OperatingSystem"):
+			return []map[string]string{{"csname": "WIN-SRV", "caption": "Windows Server 2022", "totalvisiblememorysize": "8388608", "freephysicalmemory": "4194304"}}, nil
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_Processor"):
+			return []map[string]string{{"loadpercentage": "32"}}, nil
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_LogicalDisk"):
+			return []map[string]string{{"deviceid": "C:", "size": "107374182400", "freespace": "53687091200"}}, nil
+		case ns == "root/cimv2" && strings.Contains(wql, "Win32_Service"):
+			return []map[string]string{{"name": "W32Time", "state": "Running"}}, nil
+		case ns == "root/virtualization/v2":
+			return []map[string]string{{"name": "11111111-2222-3333-4444-555555555555", "elementname": "VM-AD", "enabledstate": "2", "healthstate": "5"}}, nil
+		}
+		return nil, nil
+	}
+	resWin := pWin.Check(context.Background())
+	if resWin.Metrics == nil || resWin.Metrics.CPUPercent == nil || *resWin.Metrics.CPUPercent != 32 {
+		t.Fatalf("expected Windows CPUPercent=32, got %+v", resWin.Metrics)
+	}
+	if len(resWin.Metrics.Disks) != 1 || len(resWin.Metrics.Guests) != 1 || len(resWin.Metrics.Services) != 1 {
+		t.Fatalf("expected Windows Disks/Guests/Services populated, got %+v", resWin.Metrics)
+	}
+
+	// Verify ProbeResult.Metrics is excluded from JSON (Nostr heartbeat backwards-compatibility)
+	wire, err := json.Marshal(resWin)
+	if err != nil {
+		t.Fatalf("json.Marshal(ProbeResult): %v", err)
+	}
+	if strings.Contains(string(wire), "VM-AD") || strings.Contains(string(wire), "Windows Server 2022") {
+		t.Fatalf("ProbeResult JSON leaked Metrics into Nostr wire payload: %s", string(wire))
+	}
+
+	// Verify LinuxSSHProbe structured metrics (loadavg + uptime + disks + services)
+	pLin := NewLinuxSSHProbe(config.ProbeConfig{
+		ID:       "lin-metrics",
+		Host:     "192.168.1.45",
+		User:     "monitor",
+		Password: "pw",
+		Services: []string{"ssh"},
+	})
+	pLin.runFn = func(_ context.Context, _ string) (string, error) {
+		return "HOST=lin-srv\nLOAD=0.42 0.35 0.30\nUPTIME=86400.4\nSTAT1=cpu 100 0 100 800 0 0 0 0\nSTAT2=cpu 120 0 120 860 0 0 0 0\nMEM_MemTotal=2048000\nMEM_MemAvailable=1024000\nDISK=/dev/sda1 ext4 104857600 52428800 52428800 50% /\nSVC=ssh\tactive\n", nil
+	}
+	resLin := pLin.Check(context.Background())
+	if resLin.Metrics == nil || resLin.Metrics.LoadAvg != "0.42 0.35 0.30" || resLin.Metrics.UptimeSec != 86400 {
+		t.Fatalf("expected Linux LoadAvg + UptimeSec, got %+v", resLin.Metrics)
+	}
+
+	// Verify Scheduler records MetricsSnapshot + numeric HistoryPoint metrics
+	sched := NewScheduler([]ScheduledProbe{
+		{Probe: pWin, Interval: time.Minute, Timeout: 2 * time.Second},
+		{Probe: pLin, Interval: time.Minute, Timeout: 2 * time.Second},
+	}, nil)
+	sched.RunNow(context.Background())
+
+	snap := sched.MetricsSnapshot()
+	if snap["win-metrics"] == nil || snap["lin-metrics"] == nil {
+		t.Fatalf("expected MetricsSnapshot for both probes, got %+v", snap)
+	}
+	histWin := sched.HistorySnapshot()["win-metrics"]
+	if len(histWin) != 1 || histWin[0].CPUPct == nil || *histWin[0].CPUPct != 32 || histWin[0].RAMPct == nil {
+		t.Fatalf("expected numeric CPU/RAM in HistoryPoint, got %+v", histWin)
+	}
+}
