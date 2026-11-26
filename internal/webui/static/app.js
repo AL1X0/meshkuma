@@ -2,36 +2,41 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const MW = () => window.MWViz || {};
 
   const STORAGE = {
     theme: "mw_theme",
     token: "mw_ui_token",
-    subtab: "mw_discover_subtab",
-    selectedProbe: "mw_selected_probe",
-    inspTab: "mw_insp_tab"
+    device: "mw_selected_probe",
+    dtab: "mw_device_tab"
   };
 
-  const PROBE_KINDS = {
-    http: { label: "HTTP / HTTPS", badge: "HTTP", host: false },
-    tcp: { label: "Port TCP", badge: "TCP", host: false },
-    docker: { label: "Docker", badge: "DOCKER", host: false },
-    synology: { label: "Synology SNMP", badge: "SYNOLOGY", host: true },
-    proxmox: { label: "Proxmox VE", badge: "PROXMOX", host: true },
-    windows_winrm: { label: "Windows WinRM", badge: "WINDOWS", host: true },
-    linux_ssh: { label: "Linux SSH", badge: "LINUX", host: true },
-    snmp_oid: { label: "SNMP OID", badge: "SNMP", host: false },
-    node_exporter: { label: "Node Exporter", badge: "LINUX EXP", host: true },
-    windows_exporter: { label: "Windows Exporter", badge: "WIN EXP", host: true }
+  /* Types d'appareils : libellés pensés pour l'utilisateur, pas pour le protocole. */
+  const KINDS = {
+    http: { label: "Site ou application web", icon: "language", desc: "Il répond, assez vite, avec un certificat valide.", host: false },
+    synology: { label: "NAS Synology", icon: "storage", desc: "Disques, RAID, température.", host: true },
+    proxmox: { label: "Proxmox", icon: "dns", desc: "Le serveur et chacune de ses VM.", host: true },
+    linux_ssh: { label: "Serveur Linux", icon: "terminal", desc: "Processeur, mémoire, disques, services.", host: true },
+    windows_winrm: { label: "PC ou serveur Windows", icon: "desktop_windows", desc: "Ressources, services, VM Hyper-V.", host: true },
+    docker: { label: "Conteneurs Docker", icon: "deployed_code", desc: "Ceux de cette machine, sans rien saisir.", host: false },
+    node_exporter: { label: "Linux (node_exporter)", icon: "monitoring", desc: "Lit les métriques Prometheus d'un serveur Linux.", host: true, advanced: true },
+    windows_exporter: { label: "Windows (windows_exporter)", icon: "monitoring", desc: "Lit les métriques Prometheus sans identifiant Windows.", host: true, advanced: true },
+    snmp_oid: { label: "Équipement SNMP", icon: "router", desc: "Routeur, switch ou onduleur : lit une valeur précise (OID).", host: false, advanced: true },
+    tcp: { label: "Port réseau", icon: "lan", desc: "Vérifie seulement qu'un port répond.", host: false, advanced: true }
   };
 
-  const PROBE_GUIDES = {
-    proxmox: "Dans Proxmox VE : Datacenter → Permissions → API Tokens → Add (ex. root@pam!meshwatch), décochez Privilege Separation ou accordez le rôle PVEAuditor sur /. Renseignez Token ID et Secret.",
-    synology: "Dans Synology DSM : Panneau de configuration → Terminal et SNMP → Activer le service SNMP (v2c recommandé en LAN, ou SNMPv3 chiffré). Port UDP 161 par défaut.",
-    windows_winrm: "Activez WinRM sur Windows/Hyper-V : exécutez « winrm quickconfig » puis « Enable-PSRemoting -Force » en PowerShell admin. Pour HTTP LAN sans TLS : « winrm set winrm/config/service @{AllowUnencrypted=\"true\"} » et Auth Basic.",
-    linux_ssh: "Sous Linux : indiquez l'utilisateur SSH et un mot de passe ou une clé privée PEM/OpenSSH (lecture seule : /proc/stat, /proc/meminfo, df, systemctl).",
-    docker: "Surveille l'état et la santé de vos conteneurs locaux via /var/run/docker.sock monté en lecture seule dans MeshWatch."
+  const GUIDES = {
+    proxmox: "Dans Proxmox : Datacenter → Permissions → API Tokens → Add (par exemple root@pam!meshwatch). Décochez « Privilege Separation », ou donnez le rôle PVEAuditor sur /. Copiez ensuite l'identifiant et le secret ici.",
+    synology: "Dans DSM : Panneau de configuration → Terminal et SNMP → onglet SNMP → activez le service. La version v2c suffit sur votre réseau local.",
+    windows_winrm: "Sur le PC Windows, dans PowerShell en administrateur : « winrm quickconfig » puis « Enable-PSRemoting -Force ». Sans HTTPS, autorisez aussi l'authentification de base.",
+    linux_ssh: "Un compte SSH en lecture suffit. MeshWatch lit seulement /proc, df et systemctl : il ne modifie rien.",
+    docker: "MeshWatch lit l'état des conteneurs par le socket Docker, monté en lecture seule."
   };
+
+  const CHECK = '<span class="ms" style="font-size:16px" aria-label="fait">check</span>';
+
+  /* -------------------- État -------------------- */
 
   function loadStoredToken() {
     try {
@@ -52,80 +57,79 @@
         sessionStorage.removeItem(STORAGE.token);
       }
     } catch {
-      /* ignore storage errors in restricted contexts */
+      /* stockage indisponible */
     }
+  }
+
+  function storedTheme() {
+    try {
+      const t = localStorage.getItem(STORAGE.theme);
+      if (t === "light" || t === "dark") return t;
+    } catch {}
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
 
   const state = {
     tab: "home",
-    discoverSubtab: localStorage.getItem(STORAGE.subtab) || "docker",
-    theme: localStorage.getItem(STORAGE.theme) || "dark",
+    theme: storedTheme(),
     token: loadStoredToken(),
     status: null,
     config: null,
     draft: null,
     rawYAML: "",
     updateInfo: null,
+    discoverInfo: null,
     dockerContainers: [],
+    dockerSocket: "/var/run/docker.sock",
     lanItems: [],
     lanScanned: false,
-    fleetFilter: "all",
-    fleetSearch: "",
-    fleetSort: "status",
-    selectedProbeID: localStorage.getItem(STORAGE.selectedProbe) || "",
-    inspectorTab: localStorage.getItem(STORAGE.inspTab) || "overview",
-    editingIndex: -1,
-    modalKind: "http",
+    lanScanning: false,
+    homeFilter: "all",
+    deviceSearch: "",
+    selectedID: (() => { try { return localStorage.getItem(STORAGE.device) || ""; } catch { return ""; } })(),
+    deviceTab: (() => { try { return localStorage.getItem(STORAGE.dtab) || "overview"; } catch { return "overview"; } })(),
+    wizard: { open: false, step: 1, kind: "", editIndex: -1, testedOK: false },
     dirty: false,
-    ledBusyUntil: 0,
-    ledBusyMode: "orbit",
-    ledBusyLabel: "",
-    ledBusySub: "",
-    paletteOpen: false,
     paletteItems: [],
     paletteIndex: 0,
     keySeq: "",
     keySeqTimer: null,
     statusTimer: null,
     toastTimer: null,
-    updatePollTimer: null
+    updatePollTimer: null,
+    confirmResolve: null,
+    peerOpen: "",
+    lastFocus: null
   };
 
-  /* -------------------- Utilities -------------------- */
+  /* -------------------- Utilitaires -------------------- */
 
   function esc(val) {
     return String(val == null ? "" : val)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function clone(obj) {
-    return JSON.parse(JSON.stringify(obj));
+    return JSON.parse(JSON.stringify(obj == null ? {} : obj));
+  }
+
+  function plural(n, one, many) {
+    return n + " " + (n > 1 ? many : one);
   }
 
   function ensureDraftShape(cfg) {
     const d = cfg && typeof cfg === "object" ? clone(cfg) : {};
     if (!d.node || typeof d.node !== "object") {
-      d.node = {
-        name: "mon-homelab",
-        private_key_hex: "",
-        group_psk_hex: "",
-        heartbeat_interval: "30s",
-        peer_timeout: "1m30s"
-      };
+      d.node = { name: "", private_key_hex: "", group_psk_hex: "", heartbeat_interval: "30s", peer_timeout: "1m30s" };
     }
-    if (!d.logging || typeof d.logging !== "object") {
-      d.logging = { level: "info", format: "text" };
-    }
-    if (!d.nostr || typeof d.nostr !== "object") {
-      d.nostr = { relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"] };
-    }
+    if (!d.logging || typeof d.logging !== "object") d.logging = { level: "info", format: "text" };
+    if (!d.nostr || typeof d.nostr !== "object") d.nostr = { relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"] };
     if (!Array.isArray(d.nostr.relays)) d.nostr.relays = [];
-    if (!d.auto_mute || typeof d.auto_mute !== "object") {
-      d.auto_mute = { targets: ["1.1.1.1:443", "9.9.9.9:443"], timeout: "3s" };
-    }
+    if (!d.auto_mute || typeof d.auto_mute !== "object") d.auto_mute = { targets: ["1.1.1.1:443", "9.9.9.9:443"], timeout: "3s" };
     if (!Array.isArray(d.auto_mute.targets)) d.auto_mute.targets = [];
     if (!Array.isArray(d.peers)) d.peers = [];
     if (!Array.isArray(d.probes)) d.probes = [];
@@ -137,61 +141,79 @@
     return d;
   }
 
-  function showToast(msg, tone = "ok") {
-    const el = $("toast-bar");
-    if (!el) return;
-    el.textContent = msg;
-    el.className = "toast-bar" + (tone === "err" ? " is-err" : tone === "warn" ? " is-warn" : " is-ok");
-    el.hidden = false;
-    clearTimeout(state.toastTimer);
-    state.toastTimer = setTimeout(() => {
-      el.hidden = true;
-    }, 3800);
+  function toSec(ts) {
+    if (ts == null || ts === "") return 0;
+    if (typeof ts === "number") return ts > 1e12 ? Math.floor(ts / 1000) : ts;
+    const parsed = Date.parse(ts);
+    return Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
   }
 
-  function fmtUptime(sec) {
-    const s = Math.max(0, Math.floor(Number(sec) || 0));
-    if (!s) return "—";
-    const d = Math.floor(s / 86400);
-    const h = Math.floor((s % 86400) / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    if (d > 0) return d + "j " + h + "h";
-    if (h > 0) return h + "h " + m + "m";
-    return m + "m " + (s % 60) + "s";
+  function fmtDuration(sec) {
+    const s = Math.max(0, Math.round(Number(sec) || 0));
+    if (s < 60) return s + " s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + " min";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + " h" + (m % 60 ? " " + (m % 60) + " min" : "");
+    const d = Math.floor(h / 24);
+    return d + " j" + (h % 24 ? " " + (h % 24) + " h" : "");
   }
 
-  function fmtAge(tsSec) {
-    if (!tsSec) return "jamais";
-    const diff = Math.max(0, Math.round(Date.now() / 1000 - tsSec));
-    if (diff < 60) return "il y a " + diff + "s";
-    if (diff < 3600) return "il y a " + Math.floor(diff / 60) + "m";
-    if (diff < 86400) return "il y a " + Math.floor(diff / 3600) + "h";
-    return "il y a " + Math.floor(diff / 86400) + "j";
+  function fmtAgo(ts) {
+    const sec = toSec(ts);
+    if (!sec) return "jamais";
+    const diff = Math.max(0, Math.round(Date.now() / 1000 - sec));
+    if (diff < 5) return "à l'instant";
+    return "il y a " + fmtDuration(diff);
   }
 
-  function fmtTime(tsSec) {
-    if (!tsSec) return "—";
-    return new Date(tsSec * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  function fmtClock(ts) {
+    const sec = toSec(ts);
+    if (!sec) return "—";
+    const d = new Date(sec * 1000);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    const time = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    return sameDay ? time : d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) + " " + time;
   }
 
   function fmtMB(mb) {
     const v = Number(mb) || 0;
-    if (v >= 1024) return (v / 1024).toFixed(1) + " Go";
+    if (v >= 1024) return (v / 1024).toFixed(1).replace(".", ",") + " Go";
     return Math.round(v) + " Mo";
   }
 
+  function fmtPct(v) {
+    return Math.round(Number(v) || 0) + " %";
+  }
+
+  function fmtGoDuration(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    let total = 0;
+    const re = /(\d+(?:\.\d+)?)(h|ms|m|s)/g;
+    let m;
+    let matched = false;
+    while ((m = re.exec(s))) {
+      matched = true;
+      const n = parseFloat(m[1]);
+      if (m[2] === "h") total += n * 3600;
+      else if (m[2] === "m") total += n * 60;
+      else if (m[2] === "s") total += n;
+    }
+    if (!matched) return s;
+    if (total < 60) return Math.round(total) + " s";
+    const min = Math.floor(total / 60);
+    const rest = Math.round(total % 60);
+    return min + " min" + (rest ? " " + rest + " s" : "");
+  }
+
   function splitCSV(text) {
-    return String(text || "")
-      .split(/[,\n]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    return String(text || "").split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
   }
 
   function splitLines(text) {
-    return String(text || "")
-      .split(/\r?\n+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    return String(text || "").split(/\r?\n+/).map((s) => s.trim()).filter(Boolean);
   }
 
   function splitHostPort(raw, defaultPort) {
@@ -204,117 +226,101 @@
     return { host: s, port: defaultPort };
   }
 
-  function isHostKind(kind) {
-    return Boolean(PROBE_KINDS[kind]?.host);
+  /* Traduit les messages techniques les plus courants en phrases simples. */
+  function humanize(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    let m;
+    if ((m = s.match(/^(\d+)\/(\d+) up$/i))) return m[1] + " sur " + m[2] + " en marche";
+    if (/no route to host|host is unreachable|network is unreachable/i.test(s)) return "Injoignable sur le réseau";
+    if (/connection refused/i.test(s)) return "Connexion refusée : le service est peut-être arrêté";
+    if (/no such host|server misbehaving/i.test(s)) return "Adresse introuvable";
+    if (/timeout|deadline exceeded|timed out/i.test(s)) return "Pas de réponse à temps";
+    if (/x509|certificate/i.test(s)) return "Certificat refusé";
+    if (/unauthorized|authentication|permission denied|\b401\b|\b403\b/i.test(s)) return "Identifiants refusés";
+    if ((m = s.match(/^HTTP (\d{3})\b/)) && m[1].startsWith("2")) return "Répond (code " + m[1] + ")";
+    if ((m = s.match(/^HTTP (\d{3})\b/))) return "Répond avec une erreur (code " + m[1] + ")";
+    return s;
   }
 
-  function probeTargetLabel(p) {
-    if (!p) return "—";
-    if (p.url) return p.url;
-    if (p.address) return p.address;
-    if (p.host) {
-      const base = p.port ? p.host + ":" + p.port : p.host;
-      return p.oid ? base + " · " + p.oid : base;
-    }
+  function kindLabel(kind) {
+    return KINDS[kind]?.label || kind || "Appareil";
+  }
+
+  function kindIcon(kind) {
+    return KINDS[kind]?.icon || "sensors";
+  }
+
+  function probeTarget(p) {
+    if (!p) return "";
     if (p.kind === "docker") {
-      return p.containers && p.containers.length ? p.containers.join(", ") : p.socket || "Docker local";
+      return p.containers && p.containers.length ? plural(p.containers.length, "conteneur choisi", "conteneurs choisis") : "Tous les conteneurs";
     }
-    return PROBE_KINDS[p.kind]?.label || p.kind || "—";
+    if (p.url) return p.url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    if (p.address) return p.address;
+    if (p.host) return p.port ? p.host + ":" + p.port : p.host;
+    return "";
   }
 
-  /* -------------------- Theme & Hardware LED State -------------------- */
+  function slugify(text) {
+    return String(text || "")
+      .toLowerCase()
+      .normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .replace(/^https?:\/\//, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40);
+  }
+
+  function randomTopic() {
+    const bytes = new Uint8Array(6);
+    if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes);
+    else bytes.forEach((_, i) => { bytes[i] = Math.floor(Math.random() * 256); });
+    return "meshwatch-" + Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 10);
+  }
+
+  async function copyText(text, okMsg) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(okMsg || "Copié.");
+      return true;
+    } catch {
+      toast("Copie impossible : sélectionnez le texte à la main.", "warn");
+      return false;
+    }
+  }
+
+  function toast(msg, tone = "ok") {
+    const el = $("toast");
+    if (!el) return;
+    const icon = tone === "err" ? "error" : tone === "warn" ? "warning" : "check_circle";
+    el.className = "toast " + tone;
+    el.innerHTML = '<span class="ms" aria-hidden="true">' + icon + "</span><span>" + esc(msg) + "</span>";
+    el.hidden = false;
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => { el.hidden = true; }, tone === "err" ? 7000 : 4000);
+  }
+
+  function setBusy(btn, busy) {
+    if (!btn) return;
+    btn.classList.toggle("busy", Boolean(busy));
+    btn.disabled = Boolean(busy);
+  }
+
+  /* -------------------- Thème -------------------- */
 
   function applyTheme(theme) {
-    const next = theme === "light" ? "light" : "dark";
-    state.theme = next;
-    localStorage.setItem(STORAGE.theme, next);
-    document.documentElement.setAttribute("data-theme", next);
-    const dk = $("theme-dark-btn");
-    const lt = $("theme-light-btn");
-    if (dk) dk.classList.toggle("is-active", next === "dark");
-    if (lt) lt.classList.toggle("is-active", next === "light");
-    if (state.status) renderTopologyAndInspectorCharts();
+    state.theme = theme === "dark" ? "dark" : "light";
+    try { localStorage.setItem(STORAGE.theme, state.theme); } catch {}
+    document.documentElement.setAttribute("data-theme", state.theme);
+    const icon = $("theme-icon");
+    if (icon) icon.textContent = state.theme === "dark" ? "light_mode" : "dark_mode";
+    const btn = $("theme-btn");
+    if (btn) btn.setAttribute("aria-label", state.theme === "dark" ? "Passer en thème clair" : "Passer en thème sombre");
+    if (state.status && state.tab === "devices") renderDevices();
   }
 
-  function triggerLEDBusy(mode, label, sub, durationMs = 2800) {
-    state.ledBusyMode = mode;
-    state.ledBusyLabel = label;
-    state.ledBusySub = sub || "";
-    state.ledBusyUntil = Date.now() + durationMs;
-    syncHeroAndStatusLED();
-    setTimeout(() => {
-      if (Date.now() >= state.ledBusyUntil) syncHeroAndStatusLED();
-    }, durationMs + 60);
-  }
-
-  function syncHeroAndStatusLED() {
-    const st = state.status;
-    const pill = $("hero-led-pill");
-    const canvas = $("hero-led-canvas");
-    const label = $("hero-led-label");
-    const sub = $("hero-led-sub");
-    const sCanvas = $("status-led-canvas");
-    const sText = $("status-live-text");
-
-    let mode = "radar";
-    let color = "ok";
-    let tone = "ok";
-    let text = "Veille active";
-    let subTxt = "NOMINAL · E2E";
-
-    if (Date.now() < state.ledBusyUntil) {
-      mode = state.ledBusyMode || "orbit";
-      color = "orange";
-      tone = "orange";
-      text = state.ledBusyLabel || "Analyse en cours";
-      subTxt = state.ledBusySub || "ACTIF";
-    } else if (st) {
-      const hasDown = (st.probes || []).some((p) => !p.ok) || (st.peers || []).some((p) => p.timed_out || (p.online && !p.overall_ok));
-      if (st.mode === "setup") {
-        mode = "wave";
-        color = "warn";
-        tone = "warn";
-        text = "Initialisation requise";
-        subTxt = "CLÉS NOSTR";
-      } else if (st.muted) {
-        mode = "idle";
-        color = "muted";
-        tone = "muted";
-        text = "Auto-mute actif";
-        subTxt = "PERTE FAI LOCALE";
-      } else if (hasDown || !st.overall_ok) {
-        mode = "cross";
-        color = "danger";
-        tone = "danger";
-        text = "Incident détecté";
-        subTxt = "ALERTE ACTIVE";
-      } else {
-        mode = "radar";
-        color = "ok";
-        tone = "ok";
-        text = "Maillage nominal";
-        subTxt = ((st.probes || []).length || 0) + " SONDES · AES-GCM";
-      }
-    }
-
-    if (pill) pill.dataset.tone = tone;
-    if (label) label.textContent = text;
-    if (sub) sub.textContent = subTxt;
-    if (canvas) {
-      canvas.dataset.ledMode = mode;
-      canvas.dataset.ledColor = color;
-    }
-    if (sCanvas) {
-      sCanvas.dataset.ledMode = mode;
-      sCanvas.dataset.ledColor = color;
-    }
-    if (sText) {
-      sText.textContent = Date.now() < state.ledBusyUntil ? state.ledBusyLabel : text.toUpperCase();
-    }
-    MW().syncLEDs && MW().syncLEDs(document);
-  }
-
-  /* -------------------- HTTP & Auth -------------------- */
+  /* -------------------- API & accès -------------------- */
 
   async function apiFetch(path, opts = {}) {
     const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
@@ -329,14 +335,10 @@
     const text = await res.text();
     let data = {};
     if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = { raw: text };
-      }
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
     }
     if (!res.ok) {
-      const msg = (data.errors && data.errors.join(" · ")) || data.error || data.message || ("HTTP " + res.status);
+      const msg = (data.errors && data.errors.join(" · ")) || data.error || data.message || ("Erreur HTTP " + res.status);
       throw new Error(msg);
     }
     return data;
@@ -346,61 +348,61 @@
     const gate = $("auth-gate");
     if (!gate) return;
     gate.hidden = false;
-    const err = $("auth-error-box");
+    const err = $("auth-error");
     if (err) {
       err.textContent = errText;
       err.hidden = !errText;
     }
-    setTimeout(() => $("auth-token-input")?.focus(), 40);
+    setTimeout(() => $("auth-token")?.focus(), 40);
   }
 
-  async function submitAuthToken() {
-    const val = ($("auth-token-input")?.value || "").trim();
+  async function submitAuth(e) {
+    e.preventDefault();
+    const val = ($("auth-token")?.value || "").trim();
     if (!val) return;
     try {
-      const res = await fetch("/api/auth/check", {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + val
-        }
-      });
+      const res = await fetch("/api/auth/check", { headers: { "Content-Type": "application/json", "Authorization": "Bearer " + val } });
       const check = await res.json().catch(() => ({}));
       if (check.auth_required && !check.authenticated) {
-        openAuthGate("Jeton invalide.");
+        openAuthGate("Ce jeton n'est pas le bon.");
         return;
       }
       state.token = val;
       persistToken(val);
       $("auth-gate").hidden = true;
       await loadInitialData();
-    } catch (e) {
-      openAuthGate(e.message || "Erreur d'authentification");
+    } catch (err) {
+      openAuthGate(err.message || "Connexion impossible.");
     }
   }
 
-  /* -------------------- Initial Load & Polling -------------------- */
+  /* -------------------- Chargement -------------------- */
 
   async function bootstrap() {
     applyTheme(state.theme);
-    bindStaticEvents();
-    MW().syncLEDs && MW().syncLEDs(document);
-
+    bindEvents();
+    routeFromHash();
     try {
       const check = await apiFetch("/api/auth/check", { method: "GET" });
       if (check.auth_required && !check.authenticated) {
         openAuthGate();
         return;
       }
-      if (state.token && check.authenticated) {
-        persistToken(state.token);
-      }
+      if (state.token && check.authenticated) persistToken(state.token);
       await loadInitialData();
     } catch (e) {
       if (!String(e.message || "").includes("401")) {
-        showToast("Erreur de connexion au serveur : " + e.message, "err");
+        setHeroError("Impossible de joindre MeshWatch : " + e.message);
       }
     }
+  }
+
+  function setHeroError(msg) {
+    const hero = $("hero");
+    if (hero) hero.dataset.tone = "down";
+    if ($("hero-pill-text")) $("hero-pill-text").textContent = "Hors connexion";
+    if ($("home-title")) $("home-title").textContent = "L'interface ne joint plus MeshWatch.";
+    if ($("hero-sub")) $("hero-sub").textContent = msg;
   }
 
   async function loadInitialData() {
@@ -413,11 +415,10 @@
 
   async function fetchStatus() {
     try {
-      const st = await apiFetch("/api/status", { method: "GET" });
-      state.status = st;
+      state.status = await apiFetch("/api/status", { method: "GET" });
       renderAll();
-    } catch {
-      /* handled by apiFetch if 401 */
+    } catch (e) {
+      if (!String(e.message || "").includes("401") && !state.status) setHeroError(e.message);
     }
   }
 
@@ -426,1472 +427,1185 @@
     state.config = ensureDraftShape(res.config);
     state.draft = clone(state.config);
     state.rawYAML = res.yaml || "";
-    state.dirty = false;
+    setDirty(false);
     renderConfigForms();
-    syncUnsavedBar();
+    renderAll();
   }
 
-  function markDirty() {
-    state.dirty = true;
-    syncUnsavedBar();
-  }
-
-  function syncUnsavedBar() {
-    const bar = $("unsaved-bar");
+  function setDirty(on) {
+    state.dirty = Boolean(on);
+    const bar = $("savebar");
     if (bar) bar.hidden = !state.dirty;
   }
 
   async function saveConfiguration(showMsg = true) {
     if (!state.draft) return false;
-    pullConfigFormsIntoDraft();
-    triggerLEDBusy("sweep", "Sauvegarde config", "RECHARGEMENT", 2200);
+    pullFormsIntoDraft();
     try {
-      const res = await apiFetch("/api/config", {
-        method: "PUT",
-        body: JSON.stringify({ config: state.draft })
-      });
+      const res = await apiFetch("/api/config", { method: "PUT", body: JSON.stringify({ config: state.draft }) });
       state.config = ensureDraftShape(res.config || state.draft);
       state.draft = clone(state.config);
       state.rawYAML = res.yaml || "";
-      state.dirty = false;
-      syncUnsavedBar();
-      await fetchStatus();
+      setDirty(false);
       renderConfigForms();
+      await fetchStatus();
       if (showMsg) {
-        if (res.persisted === false) {
-          showToast("Activé en mémoire (config.yaml en lecture seule).", "warn");
-        } else {
-          showToast("Configuration enregistrée et appliquée.");
-        }
+        if (res.persisted === false) toast("Appliqué, mais pas enregistré sur le disque (fichier en lecture seule).", "warn");
+        else toast("Modifications enregistrées.");
       }
       return true;
     } catch (e) {
-      showToast("Erreur d'enregistrement : " + e.message, "err");
+      toast("Enregistrement impossible : " + e.message, "err");
       return false;
     }
   }
 
-  /* -------------------- Navigation & Tabs -------------------- */
+  /* -------------------- Navigation -------------------- */
 
-  function switchTab(tab, subtab = null) {
-    const valid = ["home", "discover", "friends", "alerts", "settings"];
-    if (!valid.includes(tab)) tab = "home";
+  const TABS = ["home", "devices", "friends", "alerts", "settings"];
+
+  function routeFromHash() {
+    const raw = decodeURIComponent((location.hash || "").replace(/^#\/?/, ""));
+    const [tab, ...rest] = raw.split("/");
+    if (tab === "devices" && rest.length) {
+      state.selectedID = rest.join("/");
+    }
+    switchTab(TABS.includes(tab) ? tab : "home", false);
+  }
+
+  function switchTab(tab, pushHash = true) {
+    if (!TABS.includes(tab)) tab = "home";
     state.tab = tab;
-
-    document.querySelectorAll(".space-link[data-tab]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.tab === tab);
+    $$(".navlink[data-tab]").forEach((b) => {
+      const on = b.dataset.tab === tab;
+      b.classList.toggle("on", on);
+      if (on) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
     });
-    document.querySelectorAll(".view-panel[data-panel]").forEach((sec) => {
-      sec.hidden = sec.dataset.panel !== tab;
-    });
-
-    const spaceTabs = $("space-tabs");
-    if (spaceTabs) {
-      spaceTabs.hidden = tab !== "discover";
+    $$(".view[data-view]").forEach((v) => { v.hidden = v.dataset.view !== tab; });
+    if (pushHash) {
+      const target = "#/" + tab + (tab === "devices" && state.selectedID ? "/" + encodeURIComponent(state.selectedID) : "");
+      if (location.hash !== target) history.replaceState(null, "", target);
     }
-    if (tab === "discover") {
-      switchDiscoverSubtab(subtab || state.discoverSubtab);
-    }
-
-    $("sidebar")?.classList.remove("open");
     renderAll();
+    window.scrollTo({ top: 0 });
   }
 
-  function switchDiscoverSubtab(sub) {
-    const valid = ["docker", "lan", "managed"];
-    if (!valid.includes(sub)) sub = "docker";
-    state.discoverSubtab = sub;
-    localStorage.setItem(STORAGE.subtab, sub);
-
-    document.querySelectorAll("#space-tabs button[data-subtab]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.subtab === sub);
-    });
-    document.querySelectorAll("#view-discover .sub-panel[data-subpanel]").forEach((el) => {
-      el.hidden = el.dataset.subpanel !== sub;
-    });
-
-    if (sub === "managed") renderManagedProbes();
+  function openDevice(id) {
+    state.selectedID = id;
+    try { localStorage.setItem(STORAGE.device, id); } catch {}
+    switchTab("devices");
   }
 
-  /* -------------------- Global Rendering -------------------- */
+  /* -------------------- Données dérivées -------------------- */
+
+  function deviceList() {
+    const st = state.status || {};
+    const runtime = {};
+    (st.probes || []).forEach((p) => { runtime[p.id] = p; });
+    const cfg = state.draft?.probes || [];
+    const seen = new Set();
+    const list = cfg.map((c, idx) => {
+      seen.add(c.id);
+      const r = runtime[c.id];
+      return { id: c.id, kind: c.kind, cfg: c, idx, rt: r || null, ok: r ? r.ok : null, summary: r ? r.summary : "", latency: r ? r.latency_ms : null };
+    });
+    (st.probes || []).forEach((r) => {
+      if (!seen.has(r.id)) list.push({ id: r.id, kind: r.kind, cfg: null, idx: -1, rt: r, ok: r.ok, summary: r.summary, latency: r.latency_ms });
+    });
+    return list;
+  }
+
+  function sortDevices(list) {
+    return list.slice().sort((a, b) => {
+      const ra = a.ok === false ? 0 : a.ok === null ? 1 : 2;
+      const rb = b.ok === false ? 0 : b.ok === null ? 1 : 2;
+      if (ra !== rb) return ra - rb;
+      return (a.id || "").localeCompare(b.id || "", "fr");
+    });
+  }
+
+  function peerState(p) {
+    if (p.timed_out) return { tone: "down", label: "Ne répond plus" };
+    if (p.online && !p.overall_ok) {
+      const bad = (p.probes || []).filter((x) => !x.ok).length;
+      return { tone: "warn", label: bad ? plural(bad, "souci", "soucis") : "Un souci" };
+    }
+    if (p.online) return { tone: "ok", label: "En ligne" };
+    return { tone: "off", label: "En attente" };
+  }
+
+  function initials(name) {
+    const parts = String(name || "?").replace(/[-_.]/g, " ").trim().split(/\s+/);
+    return ((parts[0] || "?")[0] + (parts[1] ? parts[1][0] : (parts[0] || "")[1] || "")).toUpperCase();
+  }
+
+  function lastCheckTs() {
+    const ph = state.status?.probe_history || {};
+    let max = 0;
+    Object.values(ph).forEach((arr) => (arr || []).forEach((p) => { if (p.ts > max) max = p.ts; }));
+    return max;
+  }
+
+  function hasAlertChannel() {
+    const n = state.status?.notifications;
+    if (n) return Boolean(n.ntfy_enabled || n.photon_enabled);
+    const d = state.draft?.notifications;
+    return Boolean(d?.ntfy?.enabled || d?.photon_imessage?.enabled);
+  }
+
+  function uptimePct(hist) {
+    if (!hist || !hist.length) return null;
+    return Math.round((hist.filter((p) => p.ok).length / hist.length) * 1000) / 10;
+  }
+
+  /* -------------------- Rendu global -------------------- */
 
   function renderAll() {
     const st = state.status;
     if (!st) return;
-
-    renderSidebar(st);
-    renderTopbar(st);
-    renderHome(st);
-    renderManagedProbes();
-    renderFriendsView(st);
-    renderStatusbar(st);
-    syncHeroAndStatusLED();
-    MW().syncLEDs && MW().syncLEDs(document);
+    renderWelcome(st);
+    renderNav(st);
+    if (state.tab === "home") renderHome(st);
+    if (state.tab === "devices") renderDevices();
+    if (state.tab === "friends") renderFriends(st);
+    if (state.tab === "settings") renderSettingsLive(st);
+    if (state.wizard.open && state.wizard.step === 1) renderFound();
   }
 
-  function renderSidebar(st) {
-    const probes = st.probes || [];
-    const peers = st.peers || [];
-    const relays = st.relays || [];
-    const connRelays = relays.filter((r) => r.connected).length;
-
-    const fb = $("nav-friends-badge");
-    if (fb) {
-      fb.textContent = String(peers.length);
-      fb.hidden = peers.length === 0;
+  function renderWelcome(st) {
+    const w = $("welcome");
+    if (!w) return;
+    const show = st.mode === "setup";
+    if (show && w.hidden) {
+      w.hidden = false;
+      setTimeout(() => $("welcome-name")?.focus(), 60);
+    } else if (!show) {
+      w.hidden = true;
     }
-
-    const hostDot = $("sidebar-host-dot");
-    if (hostDot) {
-      hostDot.className = "pulse-dot status-dot " + (st.mode === "setup" ? "is-warn" : st.overall_ok ? "is-ok" : "is-err");
-    }
-    if ($("sidebar-host-name")) $("sidebar-host-name").textContent = st.node_name || "MeshWatch";
-    if ($("sidebar-host-meta")) $("sidebar-host-meta").textContent = probes.length + " sonde(s) · " + connRelays + "/" + relays.length + " relais";
-    if ($("sidebar-host-uptime")) $("sidebar-host-uptime").textContent = "uptime " + fmtUptime(st.uptime_sec);
-
-    const listEl = $("sidebar-probes");
-    if (!listEl) return;
-    if (!probes.length) {
-      listEl.innerHTML = '<div style="padding:4px 6px;font-size:11.5px;color:var(--text-faint);">Aucune sonde</div>';
-      return;
-    }
-    listEl.innerHTML = probes.slice(0, 10).map((p) => {
-      const sel = p.id === state.selectedProbeID ? " active" : "";
-      const dotCls = p.ok ? "is-ok" : "is-err";
-      const metrics = (st.probe_metrics || {})[p.id];
-      const badgeTxt = metrics && metrics.cpu_percent != null
-        ? Math.round(metrics.cpu_percent) + "%"
-        : p.latency_ms + "ms";
-      return (
-        '<button class="side-link' + sel + '" type="button" data-side-probe="' + esc(p.id) + '">' +
-        '<span class="status-dot ' + dotCls + '"></span>' +
-        '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(p.id) + "</span>" +
-        '<span class="mono" style="font-size:10.5px;color:var(--text-faint);">' + esc(badgeTxt) + "</span>" +
-        "</button>"
-      );
-    }).join("");
-
-    listEl.querySelectorAll("[data-side-probe]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        selectProbe(btn.dataset.sideProbe);
-        if (state.tab !== "home") switchTab("home");
-      });
-    });
   }
 
-  function renderTopbar(st) {
-    const probes = st.probes || [];
-    const okCount = probes.filter((p) => p.ok).length;
-    const peers = st.peers || [];
-    const onlinePeers = peers.filter((p) => p.online).length;
-    const pm = st.probe_metrics || {};
-
-    let cpuSum = 0;
-    let cpuN = 0;
-    probes.forEach((p) => {
-      const m = pm[p.id];
-      if (m && typeof m.cpu_percent === "number") {
-        cpuSum += m.cpu_percent;
-        cpuN++;
-      }
-    });
-    const avgCPU = cpuN ? Math.round(cpuSum / cpuN) + "%" : "—";
-    const latencies = probes.map((p) => p.latency_ms).filter((v) => typeof v === "number" && v > 0);
-    const avgLat = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) + " ms" : "—";
-
-    const gp = $("g-probes");
-    if (gp) {
-      gp.textContent = okCount + "/" + probes.length;
-      gp.className = okCount < probes.length ? "hot" : "";
+  function renderNav(st) {
+    const down = deviceList().filter((d) => d.ok === false).length;
+    const nd = $("nav-devices-alert");
+    if (nd) {
+      nd.hidden = !down;
+      nd.textContent = String(down);
+      nd.className = "nav-count down";
+      nd.title = plural(down, "appareil ne répond plus", "appareils ne répondent plus");
     }
-    const gc = $("g-cpu");
-    if (gc) {
-      gc.textContent = avgCPU;
-      gc.className = cpuN && cpuSum / cpuN >= 80 ? "hot" : "";
+    const badPeers = (st.peers || []).filter((p) => peerState(p).tone === "down" || peerState(p).tone === "warn").length;
+    const nf = $("nav-friends-alert");
+    if (nf) {
+      nf.hidden = !badPeers;
+      nf.textContent = String(badPeers);
+      nf.className = "nav-count";
     }
-    if ($("g-latency")) $("g-latency").textContent = avgLat;
-    if ($("g-peers")) $("g-peers").textContent = onlinePeers + "/" + peers.length;
   }
 
-  function renderStatusbar(st) {
-    const relays = st.relays || [];
-    const connRelays = relays.filter((r) => r.connected).length;
-    const probes = st.probes || [];
-    const nm = $("status-network-meta");
-    if (nm) {
-      nm.textContent =
-        (st.node_name || "MeshWatch") +
-        " · " + connRelays + "/" + relays.length + " relais · " +
-        probes.length + " sondes · HB " + (st.heartbeat_interval_sec || 15) + "s";
-    }
-    const sv = $("status-version");
-    if (sv) sv.textContent = (st.version || "dev") + (st.commit ? " (" + st.commit.slice(0, 7) + ")" : "");
-  }
-
-  /* -------------------- View 01: Home, Metrics, Fleet & Inspector -------------------- */
+  /* -------------------- Accueil -------------------- */
 
   function renderHome(st) {
-    const probes = st.probes || [];
+    const devices = deviceList();
+    const down = devices.filter((d) => d.ok === false);
     const peers = st.peers || [];
+    const onlinePeers = peers.filter((p) => p.online);
     const relays = st.relays || [];
-    const pm = st.probe_metrics || {};
-    const ph = st.probe_history || {};
-    const cfgProbes = state.draft?.probes || [];
-
-    const setupNotice = $("home-setup-notice");
-    if (setupNotice) {
-      setupNotice.hidden = st.mode !== "setup";
-    }
-
-    const okCount = probes.filter((p) => p.ok).length;
     const connRelays = relays.filter((r) => r.connected).length;
-    const onlinePeers = peers.filter((p) => p.online).length;
 
-    const subEl = $("home-sub");
-    if (subEl) {
-      subEl.textContent =
-        (st.node_name || "Agent local") +
-        " · " + okCount + "/" + probes.length + " sondes saines · " +
-        onlinePeers + "/" + peers.length + " amis en ligne · " +
-        connRelays + "/" + relays.length + " relais Nostr";
-    }
+    /* Bandeau principal : une phrase dit d'abord si tout va bien. */
+    let tone = "ok";
+    let pill = "Tout va bien";
+    let title;
+    let sub;
+    const lastTs = lastCheckTs();
+    const checkTxt = lastTs ? "Dernière vérification " + fmtAgo(lastTs) + "." : "";
+    const friendsTxt = onlinePeers.length
+      ? " Si votre connexion tombe, " + (onlinePeers.length > 1 ? onlinePeers.length + " amis le verront" : "1 ami le verra") + " et vous préviendr" + (onlinePeers.length > 1 ? "ont" : "a") + " sur votre téléphone."
+      : " Aucun ami ne veille encore sur vous si votre connexion tombe.";
 
-    const hasNode = st.mode !== "setup" && Boolean(st.node_name);
-    const hasProbes = cfgProbes.length > 0 || probes.length > 0;
-    const hasPeers = peers.length > 0;
-    const todo = $("home-todo-strip");
-    if (todo) {
-      todo.hidden = hasNode && hasProbes && hasPeers;
-      $("todo-step-node")?.classList.toggle("is-done", hasNode);
-      $("todo-step-probes")?.classList.toggle("is-done", hasProbes);
-      $("todo-step-friends")?.classList.toggle("is-done", hasPeers);
-      if ($("todo-mark-node")) $("todo-mark-node").textContent = hasNode ? "✓" : "1";
-      if ($("todo-mark-probes")) $("todo-mark-probes").textContent = hasProbes ? "✓" : "2";
-      if ($("todo-mark-friends")) $("todo-mark-friends").textContent = hasPeers ? "✓" : "3";
-    }
-
-    const pct = probes.length ? Math.round((okCount / probes.length) * 100) : 100;
-    if ($("mc-probes-val")) $("mc-probes-val").innerHTML = okCount + " <small>/ " + probes.length + "</small>";
-    if ($("mc-probes-dot")) $("mc-probes-dot").className = "status-dot " + (okCount < probes.length ? "is-err" : "is-ok");
-    if ($("mc-probes-sub")) $("mc-probes-sub").textContent = probes.length ? pct + "% opérationnelles" : "Ajoutez une première sonde";
-
-    const latSamples = [];
-    probes.forEach((p) => {
-      const h = ph[p.id] || [];
-      h.forEach((pt, idx) => {
-        if (!latSamples[idx]) latSamples[idx] = [];
-        if (typeof pt.latency_ms === "number") latSamples[idx].push(pt.latency_ms);
-      });
-    });
-    const avgLatSeries = latSamples
-      .filter((arr) => arr && arr.length)
-      .map((arr) => arr.reduce((a, b) => a + b, 0) / arr.length);
-
-    let cpuVals = [];
-    probes.forEach((p) => {
-      const m = pm[p.id];
-      if (m && typeof m.cpu_percent === "number") cpuVals.push(m.cpu_percent);
-    });
-    const avgCPU = cpuVals.length ? cpuVals.reduce((a, b) => a + b, 0) / cpuVals.length : null;
-    if ($("mc-cpu-val")) $("mc-cpu-val").innerHTML = avgCPU != null ? Math.round(avgCPU) + "<small>%</small>" : "—";
-    if ($("mc-cpu-sub")) $("mc-cpu-sub").textContent = cpuVals.length ? "Sur " + cpuVals.length + " hôte(s) instrumenté(s)" : "Pas d'hôte CPU configuré";
-    if ($("mc-cpu-meter")) $("mc-cpu-meter").innerHTML = avgCPU != null ? MW().meterHTML(avgCPU, 75, 90) : "";
-
-    const cpuSeries = [];
-    probes.forEach((p) => {
-      const h = ph[p.id] || [];
-      h.forEach((pt, idx) => {
-        if (typeof pt.cpu === "number") {
-          if (!cpuSeries[idx]) cpuSeries[idx] = [];
-          cpuSeries[idx].push(pt.cpu);
-        }
-      });
-    });
-    const avgCpuSeries = cpuSeries.filter((a) => a && a.length).map((a) => a.reduce((x, y) => x + y, 0) / a.length);
-    if ($("mc-cpu-spark")) $("mc-cpu-spark").innerHTML = MW().sparklineHTML(avgCpuSeries, { color: "var(--action)", fluid: true, max: 100 });
-
-    const latAll = probes.map((p) => p.latency_ms).filter((v) => typeof v === "number").sort((a, b) => a - b);
-    const p50 = latAll.length ? latAll[Math.floor(latAll.length / 2)] : null;
-    const p95 = latAll.length ? latAll[Math.min(latAll.length - 1, Math.floor(latAll.length * 0.95))] : null;
-    if ($("mc-lat-val")) $("mc-lat-val").innerHTML = p50 != null ? p50 + "<small>ms</small>" : "—";
-    if ($("mc-lat-sub")) $("mc-lat-sub").textContent = p95 != null ? "P95 : " + p95 + " ms" : "Aucune mesure";
-    if ($("mc-lat-spark")) $("mc-lat-spark").innerHTML = MW().sparklineHTML(avgLatSeries, { color: "var(--info)", fluid: true });
-    if ($("mc-probes-spark")) $("mc-probes-spark").innerHTML = MW().sparklineHTML(probes.map((p) => (p.ok ? 100 : 0)), { color: "var(--ok)", fluid: true, max: 100 });
-
-    if ($("mc-mesh-val")) $("mc-mesh-val").innerHTML = onlinePeers + " <small>/ " + peers.length + " amis</small>";
-    if ($("mc-mesh-sub")) $("mc-mesh-sub").textContent = connRelays + "/" + relays.length + " relais Nostr · " + (st.muted ? "Auto-mute actif" : "En veille");
-    if ($("mc-mesh-spark")) $("mc-mesh-spark").innerHTML = MW().sparklineHTML(relays.map((r) => (r.connected ? 100 : 10)), { color: "var(--primary)", fluid: true, max: 100 });
-
-    renderFleetTable(st);
-    renderInspector(st);
-    renderTopologyAndPeers(st);
-  }
-
-  function renderFleetTable(st) {
-    const probes = st.probes || [];
-    const pm = st.probe_metrics || {};
-    const ph = st.probe_history || {};
-    const cfgProbes = state.draft?.probes || [];
-
-    const okN = probes.filter((p) => p.ok).length;
-    const downN = probes.length - okN;
-    const hostsN = probes.filter((p) => isHostKind(p.kind)).length;
-    if ($("seg-all")) $("seg-all").textContent = String(probes.length);
-    if ($("seg-ok")) $("seg-ok").textContent = String(okN);
-    if ($("seg-down")) $("seg-down").textContent = String(downN);
-    if ($("seg-hosts")) $("seg-hosts").textContent = String(hostsN);
-
-    const q = (state.fleetSearch || "").toLowerCase();
-    let list = probes.slice().filter((p) => {
-      if (state.fleetFilter === "ok" && !p.ok) return false;
-      if (state.fleetFilter === "down" && p.ok) return false;
-      if (state.fleetFilter === "hosts" && !isHostKind(p.kind)) return false;
-      if (q) {
-        const cfg = cfgProbes.find((c) => c.id === p.id);
-        const hay = (p.id + " " + p.kind + " " + p.summary + " " + probeTargetLabel(cfg)).toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-
-    list.sort((a, b) => {
-      if (state.fleetSort === "name") return (a.id || "").localeCompare(b.id || "");
-      if (state.fleetSort === "latency") return (b.latency_ms || 0) - (a.latency_ms || 0);
-      if (state.fleetSort === "cpu") {
-        const ac = pm[a.id]?.cpu_percent ?? -1;
-        const bc = pm[b.id]?.cpu_percent ?? -1;
-        return bc - ac;
-      }
-      if (a.ok !== b.ok) return a.ok ? 1 : -1;
-      return (a.id || "").localeCompare(b.id || "");
-    });
-
-    if (probes.length && (!state.selectedProbeID || !probes.some((p) => p.id === state.selectedProbeID))) {
-      selectProbe((list[0] || probes[0]).id, false);
-    }
-
-    const tbody = $("fleet-tbody");
-    const emptyEl = $("fleet-empty");
-    if (!tbody || !emptyEl) return;
-
-    if (!list.length) {
-      tbody.innerHTML = "";
-      emptyEl.hidden = false;
-      return;
-    }
-    emptyEl.hidden = true;
-
-    tbody.innerHTML = list.map((p) => {
-      const m = pm[p.id] || {};
-      const hist = ph[p.id] || [];
-      const selected = p.id === state.selectedProbeID ? " selected" : "";
-      const kindBadge = PROBE_KINDS[p.kind]?.badge || p.kind || "SONDE";
-      const statusCell = p.ok
-        ? '<span class="status-cell is-ok"><span class="status-dot is-ok"></span>OPÉRATIONNEL</span>'
-        : '<span class="status-cell is-err"><span class="status-dot is-err"></span>EN PANNE</span>';
-
-      let col3 = '<span style="color:var(--text-faint);">—</span>';
-      if (typeof m.cpu_percent === "number") {
-        col3 = "<div>" + Math.round(m.cpu_percent) + "%</div>" + MW().meterHTML(m.cpu_percent, 75, 90);
-      } else if (typeof m.temp_c === "number") {
-        col3 = '<span class="' + (m.temp_c >= 65 ? "badge warn" : "badge ok") + '">' + Math.round(m.temp_c) + " °C</span>";
-      } else if (typeof m.tls_days === "number") {
-        col3 = '<span class="mono">TLS ' + m.tls_days + "j</span>";
-      }
-
-      let col4 = '<span style="color:var(--text-faint);">—</span>';
-      if (typeof m.ram_percent === "number") {
-        col4 = "<div>RAM " + Math.round(m.ram_percent) + "%</div>" + (typeof m.disk_max_pct === "number" ? '<div style="font-size:10.5px;color:var(--text-faint);">Disk ' + Math.round(m.disk_max_pct) + "%</div>" : "");
-      } else if (m.containers && m.containers.length) {
-        col4 = '<span class="mono">' + m.containers.length + " conteneur(s)</span>";
-      } else if (typeof m.http_status === "number") {
-        col4 = '<span class="mono">HTTP ' + m.http_status + "</span>";
-      }
-
-      return (
-        '<tr class="clickable' + selected + '" data-select-probe="' + esc(p.id) + '">' +
-        "<td>" +
-          '<div class="ct-name">' +
-            '<span class="status-dot ' + (p.ok ? "is-ok" : "is-err") + '"></span>' +
-            '<div style="min-width:0;">' +
-              '<div class="ct-title">' + esc(p.id) + ' <span class="row-kind" style="margin-left:6px;">' + esc(kindBadge) + "</span></div>" +
-              '<div class="ct-sub" title="' + esc(p.summary) + '">' + esc(p.summary || "—") + "</div>" +
-            "</div>" +
-          "</div>" +
-        "</td>" +
-        "<td>" + statusCell + "</td>" +
-        '<td class="num">' + col3 + "</td>" +
-        '<td class="num">' + col4 + "</td>" +
-        '<td class="num">' +
-          "<div>" + esc(p.latency_ms) + " ms</div>" +
-          MW().uptimeStripHTML(hist, false, 14) +
-        "</td>" +
-        '<td class="num">' +
-          '<div class="row-actions">' +
-            '<button class="inline-action" type="button" data-quick-test="' + esc(p.id) + '">Tester</button>' +
-            '<button class="inline-action" type="button" data-quick-edit="' + esc(p.id) + '">Éditer</button>' +
-          "</div>" +
-        "</td>" +
-        "</tr>"
-      );
-    }).join("");
-
-    tbody.querySelectorAll("[data-select-probe]").forEach((tr) => {
-      tr.addEventListener("click", (e) => {
-        if (e.target.closest("button")) return;
-        selectProbe(tr.dataset.selectProbe);
-      });
-    });
-    tbody.querySelectorAll("[data-quick-test]").forEach((btn) => {
-      btn.addEventListener("click", () => quickTestProbeByID(btn.dataset.quickTest));
-    });
-    tbody.querySelectorAll("[data-quick-edit]").forEach((btn) => {
-      btn.addEventListener("click", () => editProbeByID(btn.dataset.quickEdit));
-    });
-  }
-
-  function selectProbe(id, rerender = true) {
-    state.selectedProbeID = id || "";
-    localStorage.setItem(STORAGE.selectedProbe, state.selectedProbeID);
-    if (rerender && state.status) {
-      renderSidebar(state.status);
-      renderFleetTable(state.status);
-      renderInspector(state.status);
-      MW().syncLEDs && MW().syncLEDs($("probe-inspector"));
-    }
-  }
-
-  function renderInspector(st) {
-    const probes = st.probes || [];
-    const probe = probes.find((p) => p.id === state.selectedProbeID) || probes[0];
-    const body = $("insp-body");
-    if (!body) return;
-
-    if (!probe) {
-      if ($("insp-title")) $("insp-title").textContent = "Aucune sonde sélectionnée";
-      if ($("insp-summary")) $("insp-summary").textContent = "Ajoutez ou sélectionnez une sonde pour inspecter ses graphiques et ressources.";
-      if ($("insp-kind-chip")) $("insp-kind-chip").textContent = "—";
-      if ($("insp-status-badge")) {
-        $("insp-status-badge").textContent = "VIDE";
-        $("insp-status-badge").className = "badge";
-      }
-      if ($("insp-latency-label")) $("insp-latency-label").textContent = "—";
-      body.innerHTML = '<div class="empty-state">Commencez dans l\'onglet Découverte ou cliquez sur + Nouvelle sonde.</div>';
-      return;
-    }
-
-    const m = (st.probe_metrics || {})[probe.id] || {};
-    const hist = (st.probe_history || {})[probe.id] || [];
-    const cfg = (state.draft?.probes || []).find((c) => c.id === probe.id);
-
-    const inspLED = $("insp-led-canvas");
-    if (inspLED) {
-      inspLED.dataset.ledMode = probe.ok ? (isHostKind(probe.kind) ? "orbit" : "link") : "cross";
-      inspLED.dataset.ledColor = probe.ok ? "ok" : "danger";
-    }
-    if ($("insp-kind-chip")) $("insp-kind-chip").textContent = PROBE_KINDS[probe.kind]?.label || probe.kind;
-    if ($("insp-status-badge")) {
-      $("insp-status-badge").textContent = probe.ok ? "OPÉRATIONNEL" : "EN PANNE";
-      $("insp-status-badge").className = "badge " + (probe.ok ? "ok" : "danger");
-    }
-    if ($("insp-latency-label")) $("insp-latency-label").textContent = probe.latency_ms + " ms";
-    if ($("insp-title")) $("insp-title").textContent = probe.id;
-    if ($("insp-summary")) $("insp-summary").textContent = probe.summary || probeTargetLabel(cfg);
-
-    const resCount =
-      (m.nodes?.length || 0) +
-      (m.guests?.length || 0) +
-      (m.disks?.length || 0) +
-      (m.services?.length || 0) +
-      (m.containers?.length || 0) +
-      (m.sensors?.length || 0);
-    const rc = $("insp-res-count");
-    if (rc) {
-      rc.textContent = String(resCount);
-      rc.hidden = resCount === 0;
-    }
-
-    document.querySelectorAll(".tab[data-insp-tab]").forEach((t) => {
-      t.classList.toggle("active", t.dataset.inspTab === state.inspectorTab);
-    });
-
-    if (state.inspectorTab === "resources") {
-      renderInspectorResources(body, probe, m);
-    } else if (state.inspectorTab === "history") {
-      renderInspectorHistory(body, probe, hist, st.incidents || []);
+    if (st.mode === "setup") {
+      tone = "off"; pill = "À configurer";
+      title = "Donnons un nom à cette maison.";
+      sub = "Il faut une minute pour démarrer.";
+    } else if (!devices.length) {
+      tone = "off"; pill = "Rien n'est surveillé";
+      title = "Ajoutez votre premier appareil.";
+      sub = "On cherche d'abord ce qui tourne sur votre réseau : conteneurs Docker, NAS, serveurs.";
+    } else if (down.length) {
+      tone = "down"; pill = down.length > 1 ? down.length + " problèmes" : "1 problème";
+      title = down.length === 1 ? down[0].id + " ne répond plus." : down.length + " appareils ne répondent plus.";
+      sub = (devices.length - down.length) + " sur " + devices.length + " fonctionnent normalement. " + checkTxt;
+    } else if (st.muted) {
+      tone = "warn"; pill = "Connexion coupée";
+      title = "Votre connexion Internet semble coupée.";
+      sub = "Vos alertes attendent son retour. Vos amis, eux, voient que vous ne répondez plus.";
     } else {
-      renderInspectorOverview(body, probe, m, hist, cfg);
+      title = devices.length === 1 ? "Votre appareil répond." : "Vos " + devices.length + " appareils répondent.";
+      sub = checkTxt + friendsTxt;
     }
-  }
+    const hero = $("hero");
+    if (hero) hero.dataset.tone = tone;
+    $("hero-pill-text").textContent = pill;
+    $("home-title").textContent = title;
+    $("hero-sub").textContent = sub.trim() || " ";
 
-  function renderInspectorOverview(body, probe, m, hist, cfg) {
-    let html = "";
-
-    html +=
-      '<div class="res-item">' +
-      '<div class="res-group-title">Disponibilité sur les derniers contrôles (' + hist.length + " pts)</div>" +
-      MW().uptimeStripHTML(hist, false, 28) +
-      "</div>";
-
-    const rings = [];
-    if (typeof m.cpu_percent === "number") {
-      rings.push(MW().ringHTML(m.cpu_percent, { size: 78, sub: "CPU" }));
-    }
-    if (typeof m.ram_percent === "number") {
-      rings.push(MW().ringHTML(m.ram_percent, { size: 78, sub: "RAM", warnAt: 80, dangerAt: 92 }));
-    }
-    if (typeof m.disk_max_pct === "number") {
-      rings.push(MW().ringHTML(m.disk_max_pct, { size: 78, sub: "DISQUE", warnAt: 85, dangerAt: 95 }));
-    }
-    if (typeof m.temp_c === "number") {
-      const tPct = Math.min(100, (m.temp_c / 85) * 100);
-      rings.push(MW().ringHTML(tPct, { size: 78, display: Math.round(m.temp_c) + "°C", sub: "TEMP", warnAt: 70, dangerAt: 85 }));
-    }
-    if (typeof m.tls_days === "number") {
-      const tlsPct = Math.min(100, (m.tls_days / 90) * 100);
-      rings.push(MW().ringHTML(tlsPct, { size: 78, display: m.tls_days + "j", sub: "TLS", color: m.tls_days < 14 ? "var(--danger)" : "var(--ok)" }));
-    }
-
-    if (rings.length) {
-      html += '<div style="display:flex;gap:14px;flex-wrap:wrap;justify-content:space-around;padding:8px 0;">' + rings.join("") + "</div>";
-    }
-
-    html += '<div id="insp-chart-latency"></div>';
-    if (hist.some((pt) => typeof pt.cpu === "number")) html += '<div id="insp-chart-cpu"></div>';
-    if (hist.some((pt) => typeof pt.ram === "number")) html += '<div id="insp-chart-ram"></div>';
-    if (hist.some((pt) => typeof pt.disk === "number")) html += '<div id="insp-chart-disk"></div>';
-    if (hist.some((pt) => typeof pt.temp === "number")) html += '<div id="insp-chart-temp"></div>';
-
-    const kvs = [
-      ["Cible", m.target || probeTargetLabel(cfg)],
-      ["Hôte / OS", [m.hostname, m.os].filter(Boolean).join(" · ") || null],
-      ["RAM détaillée", m.ram_total_mb ? fmtMB(m.ram_used_mb) + " / " + fmtMB(m.ram_total_mb) : null],
-      ["Load average", typeof m.load_avg === "number" ? m.load_avg.toFixed(2) : null],
-      ["Uptime machine", m.uptime_sec ? fmtUptime(m.uptime_sec) : null],
-      ["Certificat TLS", m.tls_subject ? m.tls_subject + (m.tls_expiry ? " (exp. " + m.tls_expiry + ")" : "") : null],
-      ["Valeur SNMP", m.snmp_value || null],
-      ["Cadence sonde", cfg ? (cfg.interval || "1m") + " (timeout " + (cfg.timeout || "10s") + ")" : null]
-    ].filter((pair) => pair[1]);
-
-    if (kvs.length) {
-      html += '<div class="res-item"><div class="res-group-title">Détails techniques</div><dl class="kv">' +
-        kvs.map(([k, v]) => "<dt>" + esc(k) + '</dt><dd class="mono">' + esc(v) + "</dd>").join("") +
-        "</dl></div>";
-    }
-
-    body.innerHTML = html;
-    renderInspectorCharts(probe, hist);
-  }
-
-  function renderInspectorCharts(probe, hist) {
-    const latBox = $("insp-chart-latency");
-    if (latBox && MW().renderLineChart) {
-      MW().renderLineChart(latBox, {
-        title: "Latence de sonde",
-        data: hist.map((p) => ({ ts: p.ts, v: p.latency_ms })),
-        latest: probe.latency_ms + " ms",
-        color: "var(--info)",
-        height: 118,
-        format: (v) => Math.round(v) + " ms"
+    /* Ce qui demande votre attention */
+    const items = [];
+    down.forEach((d) => {
+      items.push({
+        tone: "down", icon: "error",
+        html: "<b>" + esc(d.id) + " ne répond plus.</b><span class=\"muted\" title=\"" + esc(d.summary || "") + "\">" + esc(humanize(d.summary)) + "</span>",
+        actions: '<button class="btn sm" type="button" data-open-device="' + esc(d.id) + '">Voir</button>'
       });
-    }
-
-    const cpuBox = $("insp-chart-cpu");
-    if (cpuBox && MW().renderLineChart) {
-      const pts = hist.filter((p) => typeof p.cpu === "number").map((p) => ({ ts: p.ts, v: p.cpu }));
-      const latest = pts.length ? pts[pts.length - 1].v.toFixed(1) + "%" : "—";
-      MW().renderLineChart(cpuBox, {
-        title: "Utilisation CPU",
-        data: pts,
-        latest,
-        color: "var(--action)",
-        height: 118,
-        max: 100,
-        format: (v) => v.toFixed(1) + "%"
-      });
-    }
-
-    const ramBox = $("insp-chart-ram");
-    if (ramBox && MW().renderLineChart) {
-      const pts = hist.filter((p) => typeof p.ram === "number").map((p) => ({ ts: p.ts, v: p.ram }));
-      const latest = pts.length ? pts[pts.length - 1].v.toFixed(1) + "%" : "—";
-      MW().renderLineChart(ramBox, {
-        title: "Mémoire vive (RAM)",
-        data: pts,
-        latest,
-        color: "var(--ok)",
-        height: 118,
-        max: 100,
-        format: (v) => v.toFixed(1) + "%"
-      });
-    }
-
-    const diskBox = $("insp-chart-disk");
-    if (diskBox && MW().renderLineChart) {
-      const pts = hist.filter((p) => typeof p.disk === "number").map((p) => ({ ts: p.ts, v: p.disk }));
-      const latest = pts.length ? pts[pts.length - 1].v.toFixed(1) + "%" : "—";
-      MW().renderLineChart(diskBox, {
-        title: "Disque principal (max %)",
-        data: pts,
-        latest,
-        color: "var(--warn)",
-        height: 118,
-        max: 100,
-        format: (v) => v.toFixed(1) + "%"
-      });
-    }
-
-    const tempBox = $("insp-chart-temp");
-    if (tempBox && MW().renderLineChart) {
-      const pts = hist.filter((p) => typeof p.temp === "number").map((p) => ({ ts: p.ts, v: p.temp }));
-      const latest = pts.length ? Math.round(pts[pts.length - 1].v) + " °C" : "—";
-      MW().renderLineChart(tempBox, {
-        title: "Température",
-        data: pts,
-        latest,
-        color: "var(--warn)",
-        height: 118,
-        format: (v) => Math.round(v) + " °C"
-      });
-    }
-  }
-
-  function renderInspectorResources(body, probe, m) {
-    let html = "";
-
-    if (m.nodes && m.nodes.length) {
-      html += '<div class="res-group-title">Nœuds Cluster (' + m.nodes.length + ")</div>";
-      html += m.nodes.map((n) => (
-        '<div class="res-item">' +
-          '<div class="res-item-row"><strong>' + esc(n.name) + '</strong><span class="badge ' + (n.online ? "ok" : "danger") + '">' + (n.online ? "EN LIGNE" : "HORS LIGNE") + "</span></div>" +
-          '<div class="mono" style="font-size:11px;color:var(--text-muted);">CPU ' + n.cpu_pct.toFixed(1) + "% · RAM " + n.ram_pct.toFixed(1) + "% · Uptime " + fmtUptime(n.uptime_sec) + "</div>" +
-          MW().meterHTML(n.cpu_pct, 75, 90) +
-        "</div>"
-      )).join("");
-    }
-
-    if (m.guests && m.guests.length) {
-      html += '<div class="res-group-title">VMs &amp; Conteneurs LXC (' + m.guests.length + ")</div>";
-      html += m.guests.map((g) => {
-        const up = String(g.status || "").toLowerCase() === "running";
-        const meta = [];
-        if (g.id) meta.push("#" + g.id);
-        if (g.type) meta.push(g.type);
-        if (typeof g.cpu_pct === "number") meta.push("CPU " + g.cpu_pct.toFixed(1) + "%");
-        if (typeof g.ram_pct === "number") meta.push("RAM " + Math.round(g.ram_pct) + "%");
-        if (g.uptime_sec) meta.push("Up " + fmtUptime(g.uptime_sec));
-        return (
-          '<div class="res-item">' +
-            '<div class="res-item-row"><strong>' + esc(g.name || g.id) + '</strong><span class="badge ' + (up ? "ok" : "warn") + '">' + esc(g.status || "—") + "</span></div>" +
-            '<div class="mono" style="font-size:11px;color:var(--text-faint);">' + esc(meta.join(" · ")) + "</div>" +
-          "</div>"
-        );
-      }).join("");
-    }
-
-    if (m.disks && m.disks.length) {
-      html += '<div class="res-group-title">Stockage &amp; Disques (' + m.disks.length + ")</div>";
-      html += m.disks.map((d) => (
-        '<div class="res-item">' +
-          '<div class="res-item-row"><strong>' + esc(d.name) + '</strong><span class="mono">' + d.used_pct.toFixed(1) + "%</span></div>" +
-          (d.total_gb ? '<div class="mono" style="font-size:11px;color:var(--text-faint);">' + d.used_gb.toFixed(1) + " / " + d.total_gb.toFixed(1) + " Go</div>" : "") +
-          MW().meterHTML(d.used_pct, 80, 92) +
-        "</div>"
-      )).join("");
-    }
-
-    if (m.containers && m.containers.length) {
-      html += '<div class="res-group-title">Conteneurs Docker (' + m.containers.length + ")</div>";
-      html += m.containers.map((c) => {
-        const st = String(c.state || "").toLowerCase();
-        const cls = st === "running" || st === "healthy" ? "ok" : st === "unhealthy" || st === "exited" ? "danger" : "warn";
-        return (
-          '<div class="res-item">' +
-            '<div class="res-item-row"><strong>' + esc(c.name) + '</strong><span class="badge ' + cls + '">' + esc(c.state || "—") + "</span></div>" +
-            (c.health ? '<div class="mono" style="font-size:11px;color:var(--text-faint);">Santé : ' + esc(c.health) + "</div>" : "") +
-          "</div>"
-        );
-      }).join("");
-    }
-
-    if (m.services && m.services.length) {
-      html += '<div class="res-group-title">Services supervisés (' + m.services.length + ")</div>";
-      html += m.services.map((s) => (
-        '<div class="res-item">' +
-          '<div class="res-item-row"><strong>' + esc(s.name) + '</strong><span class="badge ' + (s.active ? "ok" : "danger") + '">' + esc(s.state || (s.active ? "actif" : "arrêté")) + "</span></div>" +
-        "</div>"
-      )).join("");
-    }
-
-    if (m.sensors && m.sensors.length) {
-      html += '<div class="res-group-title">Capteurs &amp; Matériel (' + m.sensors.length + ")</div>";
-      html += m.sensors.map((s) => (
-        '<div class="res-item">' +
-          '<div class="res-item-row"><strong>' + esc(s.name) + '</strong><span class="badge ' + (s.ok ? "ok" : "danger") + '">' + esc(s.status || (s.ok ? "OK" : "ALERTE")) + "</span></div>" +
-          (typeof s.temp_c === "number" ? '<div class="mono" style="font-size:11px;color:var(--text-muted);">Température : ' + Math.round(s.temp_c) + " °C</div>" : "") +
-        "</div>"
-      )).join("");
-    }
-
-    if (!html) {
-      html = '<div class="empty-state">Aucune sous-ressource détaillée remontée pour cette sonde.<br/><br/><button class="btn sm" id="insp-res-retest" type="button">Exécuter un test complet</button></div>';
-    }
-    body.innerHTML = html;
-    $("insp-res-retest")?.addEventListener("click", () => quickTestProbeByID(probe.id));
-  }
-
-  function renderInspectorHistory(body, probe, hist, incidents) {
-    const related = (incidents || []).filter((inc) => inc.target === probe.id || inc.source === probe.id);
-    let html = "";
-
-    if (related.length) {
-      html += '<div class="res-group-title">Incidents sur cette sonde (' + related.length + ")</div>";
-      html += related.slice(-8).reverse().map((inc) => (
-        '<div class="res-item">' +
-          '<div class="res-item-row"><span class="badge ' + (inc.ok ? "ok" : "danger") + '">' + (inc.ok ? "RÉTABLI" : "PANNE") + '</span><span class="mono" style="font-size:11px;color:var(--text-faint);">' + esc(fmtTime(inc.ts)) + "</span></div>" +
-          '<div style="font-size:12px;">' + esc(inc.summary) + "</div>" +
-        "</div>"
-      )).join("");
-    }
-
-    html += '<div class="res-group-title">Échantillons récents (' + hist.length + ")</div>";
-    if (!hist.length) {
-      html += '<div class="empty-state">Pas encore d\'échantillons en mémoire.</div>';
-    } else {
-      html += hist.slice(-15).reverse().map((pt) => {
-        const extra = [];
-        if (typeof pt.cpu === "number") extra.push("CPU " + Math.round(pt.cpu) + "%");
-        if (typeof pt.ram === "number") extra.push("RAM " + Math.round(pt.ram) + "%");
-        if (typeof pt.disk === "number") extra.push("Disk " + Math.round(pt.disk) + "%");
-        if (typeof pt.temp === "number") extra.push(Math.round(pt.temp) + "°C");
-        return (
-          '<div class="res-item">' +
-            '<div class="res-item-row">' +
-              '<span class="mono">' + esc(fmtTime(pt.ts)) + "</span>" +
-              '<span class="mono">' + esc(pt.latency_ms) + " ms · " + (pt.ok ? '<span style="color:var(--ok)">OK</span>' : '<span style="color:var(--danger)">KO</span>') + "</span>" +
-            "</div>" +
-            (extra.length ? '<div class="mono" style="font-size:11px;color:var(--text-faint);">' + esc(extra.join(" · ")) + "</div>" : "") +
-          "</div>"
-        );
-      }).join("");
-    }
-    body.innerHTML = html;
-  }
-
-  function renderTopologyAndPeers(st) {
-    const svg = $("home-topology-svg");
-    if (svg && MW().renderTopologySVG) {
-      MW().renderTopologySVG(svg, st, {
-        onAction: (target) => switchTab(target),
-        onPeer: (pk) => openPeerDrawer(pk)
-      });
-    }
-
-    const peersMini = $("home-peers-mini");
-    if (peersMini) {
-      const peers = st.peers || [];
-      if (!peers.length) {
-        peersMini.innerHTML = '<div style="font-size:13px;color:var(--text-muted);">Aucun ami de veille mutuelle configuré.</div>';
-      } else {
-        peersMini.innerHTML = '<div class="surface-list">' + peers.map((p) => {
-          let cls = "is-muted";
-          let label = "EN ATTENTE";
-          if (p.timed_out) { cls = "is-err"; label = "HORS LIGNE"; }
-          else if (p.online && !p.overall_ok) { cls = "is-warn"; label = "ALERTE"; }
-          else if (p.online) { cls = "is-ok"; label = "PROTÉGÉ"; }
-          return (
-            '<div class="surface-row" style="cursor:pointer;" data-open-peer="' + esc(p.pubkey_hex) + '">' +
-              '<div class="row-main">' +
-                '<div class="row-title-line"><span class="status-dot ' + cls + '"></span><span class="row-title">' + esc(p.name) + "</span></div>" +
-                '<div class="row-sub">' + esc(fmtAge(p.last_seen)) + " · " + esc((p.probes || []).length) + " sondes</div>" +
-              "</div>" +
-              '<div class="row-right"><span class="badge ' + (cls === "is-ok" ? "ok" : cls === "is-warn" ? "warn" : cls === "is-err" ? "danger" : "") + '">' + label + "</span></div>" +
-            "</div>"
-          );
-        }).join("") + "</div>";
-        peersMini.querySelectorAll("[data-open-peer]").forEach((el) => {
-          el.addEventListener("click", () => openPeerDrawer(el.dataset.openPeer));
+    });
+    peers.forEach((p) => {
+      const ps = peerState(p);
+      if (ps.tone === "down") {
+        items.push({
+          tone: "warn", icon: "person_off",
+          html: "<b>" + esc(p.name) + " ne donne plus de nouvelles</b> depuis " + esc(fmtAgo(p.last_seen).replace("il y a ", "")) + '.<span class="muted">Sa connexion ou son serveur est peut-être tombé. Une alerte a été envoyée.</span>',
+          actions: '<button class="btn sm" type="button" data-open-peer="' + esc(p.pubkey_hex) + '">Voir</button>'
+        });
+      } else if (ps.tone === "warn") {
+        const bad = (p.probes || []).filter((x) => !x.ok);
+        const what = bad.length ? bad.slice(0, 2).map((x) => x.id + (x.summary ? " (" + humanize(x.summary) + ")" : "")).join(", ") : "un appareil";
+        items.push({
+          tone: "warn", icon: "visibility",
+          html: "<b>Chez " + esc(p.name) + " : " + esc(what) + ".</b><span class=\"muted\">Ce n'est pas chez vous.</span>",
+          actions: '<button class="btn sm" type="button" data-open-peer="' + esc(p.pubkey_hex) + '">Voir</button>'
         });
       }
+    });
+    if (st.mode !== "setup" && devices.length && !hasAlertChannel()) {
+      items.push({
+        tone: "warn", icon: "notifications_off",
+        html: "<b>Vous ne recevrez aucune alerte.</b><span class=\"muted\">Aucun moyen de vous prévenir n'est activé.</span>",
+        actions: '<button class="btn sm" type="button" data-goto="alerts">Configurer</button>'
+      });
+    }
+    if (st.mode !== "setup" && relays.length && !connRelays) {
+      items.push({
+        tone: "warn", icon: "cloud_off",
+        html: "<b>Vos amis ne vous voient plus.</b><span class=\"muted\">Aucun relais du réseau privé n'est joignable.</span>",
+        actions: '<button class="btn sm" type="button" data-goto="settings">Réglages</button>'
+      });
+    }
+    if (st.setup_error) {
+      items.push({ tone: "down", icon: "error", html: "<b>Configuration incomplète.</b><span class=\"muted\">" + esc(st.setup_error) + "</span>", actions: "" });
+    }
+    $("attention-list").innerHTML = items.map((it) => (
+      '<div class="attention">' +
+        '<span class="pill ' + it.tone + '"><span class="ms">' + it.icon + "</span>" + (it.tone === "down" ? "Problème" : "À regarder") + "</span>" +
+        "<p>" + it.html + "</p>" + it.actions +
+      "</div>"
+    )).join("");
+
+    /* Pour bien démarrer */
+    const gsDevices = devices.length > 0;
+    const gsAlerts = hasAlertChannel();
+    const gsFriends = peers.length > 0;
+    const gs = $("getting-started");
+    gs.hidden = st.mode === "setup" || (gsDevices && gsAlerts && gsFriends);
+    [["gs-devices", gsDevices], ["gs-alerts", gsAlerts], ["gs-friends", gsFriends]].forEach(([id, done], i) => {
+      const li = $(id);
+      li.classList.toggle("done", done);
+      li.querySelector(".step-num").innerHTML = done ? CHECK : String(i + 1);
+    });
+
+    /* Résumé */
+    const ok = devices.filter((d) => d.ok === true).length;
+    $("sum-devices").textContent = devices.length ? ok + " sur " + devices.length + " en ligne" : "Aucun";
+    const allHist = Object.values(st.probe_history || {}).flat();
+    const up = uptimePct(allHist);
+    $("sum-devices-sub").textContent = devices.length ? (up != null ? "Disponibilité " + String(up).replace(".", ",") + " % sur les dernières vérifications" : "Première vérification en cours") : "Ajoutez un premier appareil";
+    $("sum-friends").textContent = peers.length ? onlinePeers.length + " en ligne" : "Aucun";
+    $("sum-friends-sub").textContent = peers.length ? (onlinePeers.length === peers.length ? "Vous veillez aussi sur eux" : plural(peers.length - onlinePeers.length, "ami ne répond pas", "amis ne répondent pas")) : "Invitez un ami à veiller sur vous";
+    const n = st.notifications || {};
+    const chans = [n.ntfy_enabled ? "ntfy" : "", n.photon_enabled ? "iMessage" : ""].filter(Boolean);
+    $("sum-alerts").textContent = chans.length ? "Activées" : "Désactivées";
+    $("sum-alerts-sub").textContent = chans.length ? "Par " + chans.join(" et ") : "Choisissez comment être prévenu";
+
+    /* Liste des appareils */
+    $("hf-all").textContent = String(devices.length);
+    $("hf-down").textContent = String(down.length);
+    $$("#home-filter button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.filter === state.homeFilter)));
+    const ph = st.probe_history || {};
+    const shown = sortDevices(devices).filter((d) => state.homeFilter !== "down" || d.ok === false);
+    const box = $("home-devices");
+    if (!devices.length) {
+      box.innerHTML = '<div class="empty"><span>Aucun appareil pour l\'instant.</span><button class="btn sm primary" type="button" data-action="add"><span class="ms">add</span>Ajouter un appareil</button></div>';
+    } else if (!shown.length) {
+      box.innerHTML = '<div class="empty">Aucun problème en ce moment.</div>';
+    } else {
+      box.innerHTML = shown.map((d) => deviceRowHTML(d, ph[d.id] || [])).join("");
     }
 
-    const incBox = $("home-incidents-list");
-    if (incBox) {
-      const incs = (st.incidents || []).slice(-6).reverse();
-      if (!incs.length) {
-        incBox.innerHTML = '<div style="font-size:12.5px;color:var(--text-faint);">Aucun incident récent enregistré.</div>';
-      } else {
-        incBox.innerHTML = '<div class="surface-list">' + incs.map((i) => (
-          '<div class="surface-row">' +
-            '<div class="row-main">' +
-              '<div class="row-title-line">' +
-                '<span class="badge ' + (i.ok ? "ok" : "danger") + '">' + (i.ok ? "OK" : "PANNE") + "</span>" +
-                '<span class="row-title">' + esc(i.target || i.source) + "</span>" +
-              "</div>" +
-              '<div class="row-sub">' + esc(i.summary) + "</div>" +
-            "</div>" +
-            '<span class="mono" style="font-size:11px;color:var(--text-faint);">' + esc(fmtTime(i.ts)) + "</span>" +
-          "</div>"
-        )).join("") + "</div>";
-      }
+    const notWatched = state.dockerContainers.filter((c) => !c.monitored).length;
+    const foot = $("home-devices-foot");
+    foot.hidden = !notWatched || st.mode === "setup";
+    $("home-devices-foot-text").textContent = notWatched ? plural(notWatched, "conteneur Docker de cette machine n'est pas encore surveillé.", "conteneurs Docker de cette machine ne sont pas encore surveillés.") : "";
+
+    /* Amis */
+    const fbox = $("home-friends");
+    if (!peers.length) {
+      fbox.innerHTML = '<div class="empty"><span>Personne ne veille encore sur vous.</span><button class="btn sm" type="button" data-goto="friends">Inviter un ami</button></div>';
+    } else {
+      fbox.innerHTML = peers.map((p) => {
+        const ps = peerState(p);
+        const bad = (p.probes || []).filter((x) => !x.ok);
+        const line = ps.tone === "warn" && bad.length ? bad[0].id + " : " + humanize(bad[0].summary) : "Signal reçu " + fmtAgo(p.last_seen);
+        return (
+          '<button class="row" type="button" data-open-peer="' + esc(p.pubkey_hex) + '">' +
+            '<span class="avatar" aria-hidden="true">' + esc(initials(p.name)) + "</span>" +
+            '<span class="row-main"><span class="row-title"><b>' + esc(p.name) + '</b></span><span class="row-sub"><span>' + esc(line) + "</span></span></span>" +
+            '<span class="pill ' + ps.tone + '">' + esc(ps.label) + "</span>" +
+          "</button>"
+        );
+      }).join("");
+    }
+
+    /* Activité */
+    const incs = (st.incidents || []).slice(-6).reverse();
+    $("home-activity").innerHTML = incs.length
+      ? incs.map((i) => (
+        "<li>" +
+          '<span class="ms ' + (i.ok ? "ok" : "down") + '" aria-hidden="true">' + (i.ok ? "check_circle" : "error") + "</span>" +
+          "<span>" + esc(incidentText(i)) + "<time>" + esc(fmtAgo(i.ts)) + "</time></span>" +
+        "</li>"
+      )).join("")
+      : '<li class="muted">Rien à signaler pour l\'instant.</li>';
+
+    /* Détails techniques */
+    $("tech-summary").textContent = "Détails techniques · " + (connRelays ? "connexion privée active, aucun port ouvert" : "connexion privée en attente");
+    const techs = [
+      ["Relais Nostr", connRelays + " sur " + relays.length + " joignables"],
+      ["Chiffrement", "AES-256-GCM, de bout en bout"],
+      ["Signal envoyé", "Toutes les " + fmtDuration(st.heartbeat_interval_sec || 30) + (st.last_heartbeat_at ? " · dernier " + fmtAgo(st.last_heartbeat_at) : "")],
+      ["Allumé depuis", fmtDuration(st.uptime_sec || 0)],
+      ["Version", (st.version || "dev") + (st.commit ? " (" + st.commit.slice(0, 7) + ")" : "")]
+    ];
+    $("tech-grid").innerHTML = techs.map(([k, v]) => "<div><dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd></div>").join("");
+  }
+
+  function incidentText(i) {
+    const who = i.source === "peer" ? "Chez un ami, " : "";
+    const target = i.target || "";
+    if (i.ok) return who + target + " répond à nouveau";
+    return who + target + " : " + (humanize(i.summary) || "ne répond plus");
+  }
+
+  function deviceRowHTML(d, hist) {
+    const dot = d.ok === true ? "ok" : d.ok === false ? "down" : "";
+    const summary = d.ok === null ? "Première vérification en cours…" : (humanize(d.summary) || (d.ok ? "Répond" : "Ne répond pas"));
+    const strip = MW().uptimeStripHTML ? MW().uptimeStripHTML(hist, false, 24) : "";
+    const pct = uptimePct(hist);
+    return (
+      '<button class="row" type="button" data-open-device="' + esc(d.id) + '">' +
+        '<span class="row-icon" aria-hidden="true"><span class="ms">' + kindIcon(d.kind) + "</span></span>" +
+        '<span class="row-main">' +
+          '<span class="row-title"><b>' + esc(d.id) + "</b><small>" + esc(kindLabel(d.kind)) + "</small></span>" +
+          '<span class="row-sub" title="' + esc(d.summary || "") + '"><span class="sdot ' + dot + '" aria-hidden="true"></span><span>' + esc(summary) + "</span></span>" +
+        "</span>" +
+        '<span class="col-bars" aria-label="' + (pct != null ? esc(String(pct).replace(".", ",") + " % des dernières vérifications réussies") : "Pas encore d'historique") + '">' + strip + "</span>" +
+        '<span class="col-ms">' + (d.latency != null && d.ok !== null ? esc(d.latency) + " ms" : "—") + "</span>" +
+        '<span class="ms chev col-chev" aria-hidden="true">chevron_right</span>' +
+      "</button>"
+    );
+  }
+
+  /* -------------------- Appareils -------------------- */
+
+  function renderDevices() {
+    const st = state.status || {};
+    const all = sortDevices(deviceList());
+    const q = state.deviceSearch.toLowerCase();
+    const list = q ? all.filter((d) => (d.id + " " + kindLabel(d.kind) + " " + probeTarget(d.cfg)).toLowerCase().includes(q)) : all;
+
+    if (all.length && !all.some((d) => d.id === state.selectedID)) state.selectedID = all[0].id;
+
+    $("device-nav-count").textContent = plural(all.length, "appareil", "appareils");
+    $("device-nav-list").innerHTML = list.map((d) => (
+      '<button class="side' + (d.id === state.selectedID ? " on" : "") + '" type="button" data-select-device="' + esc(d.id) + '"' + (d.id === state.selectedID ? ' aria-current="true"' : "") + ">" +
+        '<span class="sdot ' + (d.ok === true ? "ok" : d.ok === false ? "down" : "") + '" aria-hidden="true"></span>' +
+        '<span class="grow">' + esc(d.id) + "</span>" +
+        '<span class="ms" aria-hidden="true">' + kindIcon(d.kind) + "</span>" +
+      "</button>"
+    )).join("") || '<p class="muted small" style="padding:8px 12px">Aucun résultat.</p>';
+
+    const dev = all.find((d) => d.id === state.selectedID);
+    $("device-empty").hidden = Boolean(dev);
+    $("device-body").hidden = !dev;
+    if (!dev) return;
+
+    const hist = (st.probe_history || {})[dev.id] || [];
+    const m = (st.probe_metrics || {})[dev.id] || {};
+    const cfg = dev.cfg || {};
+    const tone = dev.ok === true ? "ok" : dev.ok === false ? "down" : "off";
+
+    const meta = [kindLabel(dev.kind), probeTarget(cfg), cfg.interval ? "vérifié toutes les " + fmtGoDuration(cfg.interval) : ""].filter(Boolean);
+    $("dd-meta").textContent = meta.join(" · ");
+    $("dd-name").textContent = dev.id;
+    const pill = $("dd-pill");
+    pill.className = "pill " + tone;
+    $("dd-pill-text").textContent = dev.ok === true ? "Répond normalement" : dev.ok === false ? "Ne répond plus" : "En attente";
+    $("dd-summary").textContent = stateSentence(dev, hist);
+
+    $("dd-edit").disabled = dev.idx < 0;
+    $("dd-delete").disabled = dev.idx < 0;
+
+    const resCount = (m.nodes?.length || 0) + (m.guests?.length || 0) + (m.disks?.length || 0) + (m.services?.length || 0) + (m.containers?.length || 0) + (m.sensors?.length || 0);
+    const rc = $("dd-res-count");
+    rc.hidden = !resCount;
+    rc.textContent = String(resCount);
+
+    $$(".tab[data-dtab]").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.dtab === state.deviceTab)));
+    const panel = $("dd-panel");
+    if (state.deviceTab === "details") panel.innerHTML = deviceDetailsHTML(dev, m, cfg);
+    else if (state.deviceTab === "history") panel.innerHTML = deviceHistoryHTML(dev, hist, st.incidents || []);
+    else {
+      panel.innerHTML = deviceOverviewHTML(dev, m, hist, cfg);
+      renderDeviceCharts(dev, hist);
     }
   }
 
-  function renderTopologyAndInspectorCharts() {
-    if (!state.status) return;
-    renderTopologyAndPeers(state.status);
-    renderInspector(state.status);
+  function stateSentence(dev, hist) {
+    if (dev.ok === null) return "Première vérification en cours.";
+    if (!hist.length) return humanize(dev.summary);
+    const cur = hist[hist.length - 1].ok;
+    let i = hist.length - 1;
+    while (i > 0 && hist[i - 1].ok === cur) i--;
+    const outages = [];
+    for (let k = 1; k < hist.length; k++) if (!hist[k].ok && hist[k - 1].ok) outages.push(hist[k]);
+    if (!cur) {
+      return (i > 0 ? "Depuis " + fmtAgo(hist[i].ts).replace("il y a ", "") + ". " : "") + humanize(dev.summary);
+    }
+    if (i === 0) return hist.length > 1 ? "Aucune coupure sur les " + hist.length + " dernières vérifications." : "Première vérification réussie.";
+    return "Depuis " + fmtAgo(hist[i].ts).replace("il y a ", "") + ". " + plural(outages.length || 1, "coupure", "coupures") + " récemment, la dernière à " + fmtClock(hist[i].ts) + ".";
   }
 
-  /* -------------------- Quick Probe Actions -------------------- */
+  function gaugeHTML(label, valueTxt, pct, note, warnAt = 80, downAt = 92) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    const cls = p >= downAt ? "down" : p >= warnAt ? "warn" : "";
+    return (
+      '<div class="card gauge">' +
+        '<span class="gauge-label">' + esc(label) + "</span>" +
+        '<span class="gauge-value">' + esc(valueTxt) + "</span>" +
+        (pct != null ? '<span class="gauge-bar ' + cls + '" aria-hidden="true"><span style="width:' + p + '%"></span></span>' : "") +
+        (note ? '<span class="gauge-note">' + esc(note) + "</span>" : "") +
+      "</div>"
+    );
+  }
 
-  async function runAllProbesNow() {
-    triggerLEDBusy("orbit", "Test flotte complète", "EXÉCUTION SONDES", 3200);
+  function deviceOverviewHTML(dev, m, hist, cfg) {
+    const g = [];
+    if (typeof m.cpu_percent === "number") g.push(gaugeHTML("Processeur", fmtPct(m.cpu_percent), m.cpu_percent, typeof m.load_avg === "number" ? "Charge " + m.load_avg.toFixed(2).replace(".", ",") : "", (cfg.max_cpu_percent || 90) - 10, cfg.max_cpu_percent || 90));
+    if (typeof m.ram_percent === "number") g.push(gaugeHTML("Mémoire", fmtPct(m.ram_percent), m.ram_percent, m.ram_total_mb ? fmtMB(m.ram_used_mb) + " sur " + fmtMB(m.ram_total_mb) : "", (cfg.max_ram_percent || 90) - 10, cfg.max_ram_percent || 90));
+    if (typeof m.disk_max_pct === "number") g.push(gaugeHTML("Disque le plus plein", fmtPct(m.disk_max_pct), m.disk_max_pct, "", (cfg.max_disk_percent || 90) - 10, cfg.max_disk_percent || 90));
+    if (typeof m.temp_c === "number") g.push(gaugeHTML("Température", Math.round(m.temp_c) + " °C", (m.temp_c / 85) * 100, cfg.max_temp_c ? "Alerte au-delà de " + cfg.max_temp_c + " °C" : "", 70, 85));
+    if (typeof m.tls_days === "number") g.push(gaugeHTML("Certificat valide encore", plural(m.tls_days, "jour", "jours"), null, m.tls_expiry ? "Expire le " + m.tls_expiry : ""));
+    if (typeof m.http_status === "number") g.push(gaugeHTML("Réponse du site", "Code " + m.http_status, null, ""));
+    if (m.containers?.length) {
+      const run = m.containers.filter((c) => /running|healthy/i.test(c.state || "")).length;
+      g.push(gaugeHTML("Conteneurs", run + " sur " + m.containers.length, null, "en marche"));
+    }
+    if (m.uptime_sec) g.push(gaugeHTML("Allumé depuis", fmtDuration(m.uptime_sec), null, m.hostname || ""));
+    if (dev.latency != null && dev.ok !== null) g.push(gaugeHTML("Temps de réponse", dev.latency + " ms", null, ""));
+
+    const strip = MW().uptimeStripHTML ? MW().uptimeStripHTML(hist, false, 60) : "";
+    const pct = uptimePct(hist);
+
+    const rules = [];
+    rules.push(["wifi_off", "il ne répond plus lors d'une vérification"]);
+    if (cfg.max_cpu_percent) rules.push(["speed", "le processeur dépasse " + cfg.max_cpu_percent + " %"]);
+    if (cfg.max_ram_percent) rules.push(["memory", "la mémoire dépasse " + cfg.max_ram_percent + " %"]);
+    if (cfg.max_disk_percent) rules.push(["hard_drive", "un disque dépasse " + cfg.max_disk_percent + " %"]);
+    if (cfg.max_temp_c) rules.push(["device_thermostat", "la température dépasse " + cfg.max_temp_c + " °C"]);
+    if (cfg.tls_min_days != null && dev.kind === "http") rules.push(["lock", "le certificat expire dans moins de " + cfg.tls_min_days + " jours"]);
+    if (cfg.contains) rules.push(["text_fields", "la page ne contient plus « " + cfg.contains + " »"]);
+    if (cfg.vms?.length) rules.push(["dns", "une de ces VM s'arrête : " + cfg.vms.join(", ")]);
+    if (cfg.services?.length) rules.push(["settings", "un de ces services s'arrête : " + cfg.services.join(", ")]);
+
+    return (
+      (g.length ? '<section class="gauge-grid" aria-label="Ressources">' + g.join("") + "</section>" : "") +
+      '<section class="card chart-card" aria-labelledby="dd-avail-title">' +
+        '<div class="chart-card-head"><h2 id="dd-avail-title" class="grow">Disponibilité</h2><span class="muted small">' + (pct != null ? String(pct).replace(".", ",") + " % " + (hist.length > 1 ? "sur les " + hist.length + " dernières vérifications" : "sur la première vérification") : "Pas encore d'historique") + "</span></div>" +
+        '<div class="uptime-big">' + strip + "</div>" +
+      "</section>" +
+      '<section class="card chart-card" aria-label="Graphiques"><div class="chart-grid" id="dd-charts"></div></section>' +
+      '<section class="card pad-lg stack" aria-labelledby="dd-rules-title">' +
+        '<h2 id="dd-rules-title">Vous êtes prévenu si…</h2>' +
+        '<ul class="timeline">' + rules.map(([ic, t]) => '<li><span class="ms muted" aria-hidden="true">' + ic + "</span><span>" + esc(t) + "</span></li>").join("") + "</ul>" +
+        (dev.idx >= 0 ? '<div><button class="link-btn" type="button" data-edit-device="' + esc(dev.id) + '">Changer ces seuils</button></div>' : "") +
+      "</section>"
+    );
+  }
+
+  function renderDeviceCharts(dev, hist) {
+    const box = $("dd-charts");
+    if (!box || !MW().renderLineChart) return;
+    const series = [
+      { key: "latency_ms", title: "Temps de réponse", color: "var(--ink)", fmt: (v) => Math.round(v) + " ms" },
+      { key: "cpu", title: "Processeur", color: "var(--info)", max: 100, fmt: (v) => Math.round(v) + " %" },
+      { key: "ram", title: "Mémoire", color: "var(--live)", max: 100, fmt: (v) => Math.round(v) + " %" },
+      { key: "disk", title: "Disque", color: "var(--warn)", max: 100, fmt: (v) => Math.round(v) + " %" },
+      { key: "temp", title: "Température", color: "var(--error)", fmt: (v) => Math.round(v) + " °C" }
+    ].filter((s) => s.key === "latency_ms" || hist.some((p) => typeof p[s.key] === "number"));
+    box.innerHTML = series.map((s, i) => '<div id="dd-chart-' + i + '"></div>').join("");
+    series.forEach((s, i) => {
+      const pts = hist.filter((p) => typeof p[s.key] === "number").map((p) => ({ ts: p.ts, v: p[s.key] }));
+      MW().renderLineChart($("dd-chart-" + i), {
+        title: s.title,
+        data: pts,
+        latest: pts.length ? s.fmt(pts[pts.length - 1].v) : "—",
+        color: s.color,
+        height: 140,
+        max: s.max,
+        format: s.fmt
+      });
+    });
+  }
+
+  function resStateClass(okish, warnish) {
+    return okish ? "state-ok" : warnish ? "state-warn" : "state-down";
+  }
+
+  function deviceDetailsHTML(dev, m, cfg) {
+    const sections = [];
+    const section = (title, rows) => '<section class="card list-card res-section"><h3>' + esc(title) + "</h3>" + rows.join("") + "</section>";
+    const meter = (pct) => {
+      const v = Math.max(0, Math.min(100, Number(pct) || 0));
+      return '<span class="gauge-bar meter ' + (v >= 92 ? "down" : v >= 80 ? "warn" : "") + '" aria-hidden="true"><span style="width:' + v.toFixed(1) + '%"></span></span>';
+    };
+
+    if (m.nodes?.length) {
+      sections.push(section("Serveurs du cluster", m.nodes.map((n) => (
+        '<div class="res-row"><span class="sdot ' + (n.online ? "ok" : "down") + '"></span><div class="grow"><b>' + esc(n.name) + "</b><small>Processeur " + fmtPct(n.cpu_pct) + " · mémoire " + fmtPct(n.ram_pct) + " · allumé depuis " + fmtDuration(n.uptime_sec) + "</small></div>" +
+        '<span class="' + resStateClass(n.online) + '">' + (n.online ? "En ligne" : "Hors ligne") + "</span></div>"
+      ))));
+    }
+    if (m.guests?.length) {
+      sections.push(section("Machines virtuelles et conteneurs LXC", m.guests.map((g) => {
+        const up = String(g.status || "").toLowerCase() === "running";
+        const meta = [g.id ? "#" + g.id : "", g.type || "", typeof g.cpu_pct === "number" ? "processeur " + fmtPct(g.cpu_pct) : "", typeof g.ram_pct === "number" ? "mémoire " + fmtPct(g.ram_pct) : ""].filter(Boolean).join(" · ");
+        return '<div class="res-row"><span class="sdot ' + (up ? "ok" : "warn") + '"></span><div class="grow"><b>' + esc(g.name || g.id) + "</b><small>" + esc(meta) + '</small></div><span class="' + resStateClass(up, true) + '">' + (up ? "En marche" : esc(g.status || "Arrêtée")) + "</span></div>";
+      })));
+    }
+    if (m.disks?.length) {
+      sections.push(section("Disques et stockage", m.disks.map((d) => (
+        '<div class="res-row"><div class="grow"><b class="mono">' + esc(d.name) + "</b><small>" + (d.total_gb ? d.used_gb.toFixed(0) + " Go utilisés sur " + d.total_gb.toFixed(0) + " Go" : "") + "</small></div>" + meter(d.used_pct) + '<span class="mono">' + fmtPct(d.used_pct) + "</span></div>"
+      ))));
+    }
+    if (m.containers?.length) {
+      sections.push(section("Conteneurs", m.containers.map((c) => {
+        const s = String(c.state || "").toLowerCase();
+        const okc = s === "running" || s === "healthy";
+        const bad = s === "unhealthy" || s === "exited" || s === "dead";
+        return '<div class="res-row"><span class="sdot ' + (okc ? "ok" : bad ? "down" : "warn") + '"></span><div class="grow"><b class="mono">' + esc(c.name) + "</b>" + (c.health ? "<small>Santé : " + esc(c.health) + "</small>" : "") + '</div><span class="' + resStateClass(okc, !bad) + '">' + esc(okc ? "En marche" : c.state || "—") + "</span></div>";
+      })));
+    }
+    if (m.services?.length) {
+      sections.push(section("Services", m.services.map((s) => (
+        '<div class="res-row"><span class="sdot ' + (s.active ? "ok" : "down") + '"></span><div class="grow"><b class="mono">' + esc(s.name) + '</b></div><span class="' + resStateClass(s.active) + '">' + (s.active ? "Actif" : esc(s.state || "Arrêté")) + "</span></div>"
+      ))));
+    }
+    if (m.sensors?.length) {
+      sections.push(section("Capteurs et matériel", m.sensors.map((s) => (
+        '<div class="res-row"><span class="sdot ' + (s.ok ? "ok" : "down") + '"></span><div class="grow"><b>' + esc(s.name) + "</b>" + (typeof s.temp_c === "number" ? "<small>" + Math.round(s.temp_c) + " °C</small>" : "") + '</div><span class="' + resStateClass(s.ok) + '">' + esc(s.status || (s.ok ? "OK" : "Alerte")) + "</span></div>"
+      ))));
+    }
+
+    const kv = [
+      ["Dernier message", dev.summary || ""],
+      ["Adresse", m.target || probeTarget(cfg)],
+      ["Machine", [m.hostname, m.os].filter(Boolean).join(" · ")],
+      ["Certificat", m.tls_subject ? m.tls_subject + (m.tls_expiry ? " (expire le " + m.tls_expiry + ")" : "") : ""],
+      ["Valeur SNMP", m.snmp_value || ""],
+      ["Vérification", cfg.interval ? "toutes les " + fmtGoDuration(cfg.interval) + ", abandon après " + fmtGoDuration(cfg.timeout || "10s") : ""],
+      ["Type", kindLabel(dev.kind)]
+    ].filter((p) => p[1]);
+    sections.push('<section class="card pad-lg stack"><h3>Informations techniques</h3><dl class="kv">' + kv.map(([k, v]) => "<dt>" + esc(k) + '</dt><dd class="mono">' + esc(v) + "</dd>").join("") + "</dl></section>");
+
+    if (sections.length === 1) {
+      sections.unshift('<div class="empty-big"><span class="ms">info</span><p>Ce type d\'appareil ne remonte pas de détail supplémentaire.</p></div>');
+    }
+    return sections.join("");
+  }
+
+  function deviceHistoryHTML(dev, hist, incidents) {
+    const related = incidents.filter((i) => i.target === dev.id).slice(-15).reverse();
+    const samples = hist.slice(-20).reverse();
+    return (
+      '<section class="card pad-lg stack"><h2>Événements</h2>' +
+        (related.length
+          ? '<ol class="timeline">' + related.map((i) => '<li><span class="ms ' + (i.ok ? "ok" : "down") + '" aria-hidden="true">' + (i.ok ? "check_circle" : "error") + "</span><span>" + esc(i.ok ? "Répond à nouveau" : "Ne répond plus") + (!i.ok && i.summary ? " · " + esc(humanize(i.summary)) : "") + "<time>" + esc(fmtClock(i.ts)) + "</time></span></li>").join("") + "</ol>"
+          : '<p class="muted">Aucune coupure enregistrée depuis le démarrage.</p>') +
+      "</section>" +
+      '<section class="card list-card res-section"><h3>Dernières vérifications</h3>' +
+        (samples.length
+          ? samples.map((p) => {
+            const extra = [typeof p.cpu === "number" ? "processeur " + fmtPct(p.cpu) : "", typeof p.ram === "number" ? "mémoire " + fmtPct(p.ram) : "", typeof p.disk === "number" ? "disque " + fmtPct(p.disk) : "", typeof p.temp === "number" ? Math.round(p.temp) + " °C" : ""].filter(Boolean).join(" · ");
+            return '<div class="res-row"><span class="sdot ' + (p.ok ? "ok" : "down") + '"></span><div class="grow"><b class="mono">' + esc(fmtClock(p.ts)) + "</b>" + (extra ? "<small>" + esc(extra) + "</small>" : "") + '</div><span class="mono muted">' + esc(p.latency_ms || 0) + ' ms</span><span class="' + (p.ok ? "state-ok" : "state-down") + '">' + (p.ok ? "OK" : "Échec") + "</span></div>";
+          }).join("")
+          : '<div class="empty">Pas encore de vérification enregistrée.</div>') +
+      "</section>"
+    );
+  }
+
+  /* -------------------- Actions sur les appareils -------------------- */
+
+  async function runAllNow(btn) {
+    setBusy(btn, true);
     try {
       const res = await apiFetch("/api/probes/run", { method: "POST", body: "{}" });
       await fetchStatus();
-      const count = (res.probes || []).length;
-      const ok = (res.probes || []).filter((p) => p.ok).length;
-      showToast("Tests terminés : " + ok + "/" + count + " sondes opérationnelles.", ok === count ? "ok" : "warn");
+      const list = res.probes || [];
+      const ok = list.filter((p) => p.ok).length;
+      toast(ok === list.length ? "Tout répond (" + plural(list.length, "appareil", "appareils") + ")." : (list.length - ok) + " sur " + list.length + " ne répondent pas.", ok === list.length ? "ok" : "warn");
     } catch (e) {
-      showToast("Erreur exécution sondes : " + e.message, "err");
+      toast("Vérification impossible : " + e.message, "err");
+    } finally {
+      setBusy(btn, false);
     }
   }
 
-  async function quickTestProbeByID(id) {
+  async function testDevice(id, btn) {
     const cfg = (state.draft?.probes || []).find((p) => p.id === id);
-    if (!cfg) {
-      await runAllProbesNow();
-      return;
-    }
-    triggerLEDBusy("orbit", "Test " + id, (PROBE_KINDS[cfg.kind]?.badge || cfg.kind).toUpperCase(), 2600);
+    if (!cfg) return runAllNow(btn);
+    setBusy(btn, true);
     try {
-      const res = await apiFetch("/api/probes/test", {
-        method: "POST",
-        body: JSON.stringify({ probe: cfg })
-      });
+      const res = await apiFetch("/api/probes/test", { method: "POST", body: JSON.stringify({ probe: cfg }) });
       await fetchStatus();
-      showToast((res.ok ? "OK : " : "Échec : ") + id + " — " + (res.summary || ""), res.ok ? "ok" : "err");
+      toast(id + " : " + (res.ok ? "répond" : "ne répond pas") + (res.summary ? " · " + res.summary : ""), res.ok ? "ok" : "err");
     } catch (e) {
-      showToast("Test impossible : " + e.message, "err");
+      toast("Vérification impossible : " + e.message, "err");
+    } finally {
+      setBusy(btn, false);
     }
   }
 
-  function editProbeByID(id) {
+  async function deleteDevice(id) {
+    const ok = await confirmDialog("Supprimer " + id + " ?", "MeshWatch arrêtera de surveiller cet appareil. Son historique sera perdu.", "Supprimer");
+    if (!ok) return;
     const idx = (state.draft?.probes || []).findIndex((p) => p.id === id);
-    if (idx >= 0) openProbeModal(idx);
-  }
-
-  async function deleteProbeByID(id) {
-    if (!state.draft?.probes) return;
-    const idx = state.draft.probes.findIndex((p) => p.id === id);
     if (idx < 0) return;
     state.draft.probes.splice(idx, 1);
-    if (state.selectedProbeID === id) state.selectedProbeID = "";
-    await saveConfiguration(false);
-    showToast("Sonde supprimée : " + id);
+    state.selectedID = "";
+    if (await saveConfiguration(false)) toast(id + " n'est plus surveillé.");
   }
 
-  /* -------------------- View 02: Discovery (Docker, LAN, Managed) -------------------- */
+  /* -------------------- Découverte -------------------- */
 
   async function detectDiscoverDefaults() {
     try {
       const info = await apiFetch("/api/discover/info", { method: "GET" });
-      if (info.default_subnet && $("lan-subnet-input") && !$("lan-subnet-input").value) {
-        $("lan-subnet-input").value = info.default_subnet;
-      }
-      if (info.docker_socket && $("docker-socket-input")) {
-        $("docker-socket-input").value = info.docker_socket;
-      }
-      if (info.docker_available) {
-        runDockerScan(true);
-      }
+      state.discoverInfo = info;
+      if (info.docker_socket) state.dockerSocket = info.docker_socket;
+      if (info.docker_available) runDockerScan(true);
     } catch {
-      /* ignore optional failure */
+      /* découverte facultative */
     }
   }
 
   async function runDockerScan(silent = false) {
-    const sock = ($("docker-socket-input")?.value || "/var/run/docker.sock").trim();
-    if (!silent) triggerLEDBusy("sweep", "Scan Docker", sock, 2500);
     try {
-      const res = await apiFetch("/api/discover/docker", {
-        method: "POST",
-        body: JSON.stringify({ socket: sock })
-      });
+      const res = await apiFetch("/api/discover/docker", { method: "POST", body: JSON.stringify({ socket: state.dockerSocket }) });
       state.dockerContainers = res.containers || [];
-      renderDockerContainers();
-      const applyBtn = $("docker-apply-btn");
-      if (applyBtn) applyBtn.disabled = state.dockerContainers.length === 0;
-      if ($("docker-scan-meta")) {
-        $("docker-scan-meta").textContent = state.dockerContainers.length + " conteneur(s) détecté(s) sur " + (res.socket || sock);
-      }
+      if (res.socket) state.dockerSocket = res.socket;
     } catch (e) {
-      if ($("docker-scan-meta")) $("docker-scan-meta").textContent = "Erreur Docker : " + e.message;
-      if (!silent) showToast("Erreur scan Docker : " + e.message, "err");
+      state.dockerContainers = [];
+      if (!silent) toast("Docker inaccessible : " + e.message, "err");
     }
-  }
-
-  function renderDockerContainers() {
-    const el = $("docker-list");
-    if (!el) return;
-    if (!state.dockerContainers.length) {
-      el.innerHTML = '<div class="empty-state">Aucun conteneur détecté sur ce socket Docker.</div>';
-      return;
-    }
-    el.innerHTML = state.dockerContainers.map((c) => {
-      const badgeCls = c.running ? "ok" : "danger";
-      return (
-        '<label class="surface-row" style="cursor:pointer;">' +
-          '<div class="row-main">' +
-            '<div class="row-title-line">' +
-              '<input type="checkbox" data-docker-name="' + esc(c.name) + '"' + (c.monitored ? " checked" : "") + ' style="width:auto;min-height:auto;" />' +
-              '<span class="row-title">' + esc(c.name) + "</span>" +
-              '<span class="badge ' + badgeCls + '">' + esc(c.state || (c.running ? "running" : "stopped")) + "</span>" +
-              (c.health ? '<span class="chip">' + esc(c.health) + "</span>" : "") +
-            "</div>" +
-            '<div class="row-sub">' + esc(c.image) + (c.ports && c.ports.length ? " · Ports : " + esc(c.ports.join(", ")) : "") + "</div>" +
-          "</div>" +
-          '<span class="mono" style="font-size:11px;color:var(--text-faint);">' + esc(c.status || "") + "</span>" +
-        "</label>"
-      );
-    }).join("");
-  }
-
-  async function applyDockerSelection() {
-    if (!state.draft) state.draft = ensureDraftShape(state.config);
-    const selected = Array.from(document.querySelectorAll("[data-docker-name]:checked")).map((cb) => cb.dataset.dockerName);
-    const sock = ($("docker-socket-input")?.value || "/var/run/docker.sock").trim();
-    let dockerProbe = state.draft.probes.find((p) => p.kind === "docker");
-    if (!selected.length) {
-      state.draft.probes = state.draft.probes.filter((p) => p.kind !== "docker");
-    } else if (dockerProbe) {
-      dockerProbe.socket = sock;
-      dockerProbe.containers = selected;
-    } else {
-      state.draft.probes.push({
-        id: "conteneurs-docker",
-        kind: "docker",
-        socket: sock,
-        containers: selected,
-        interval: "30s",
-        timeout: "10s"
-      });
-    }
-    const saved = await saveConfiguration(false);
-    if (saved) {
-      await runDockerScan(true);
-      showToast("Sonde Docker mise à jour (" + selected.length + " conteneurs).");
-    }
+    if (state.status && state.tab === "home") renderHome(state.status);
+    if (state.wizard.open) renderFound();
   }
 
   async function runLANScan() {
-    const subnet = ($("lan-subnet-input")?.value || "").trim();
-    triggerLEDBusy("matrix", "Scan réseau LAN", subnet || "AUTO", 5500);
-    if ($("lan-scan-meta")) $("lan-scan-meta").textContent = "Analyse du sous-réseau en cours…";
+    if (state.lanScanning) return;
+    state.lanScanning = true;
+    renderFound();
     try {
       const res = await apiFetch("/api/discover/lan", {
         method: "POST",
-        body: JSON.stringify({
-          subnet,
-          docker_socket: ($("docker-socket-input")?.value || "").trim()
-        })
+        body: JSON.stringify({ subnet: state.discoverInfo?.default_subnet || "", docker_socket: state.dockerSocket })
       });
       state.lanItems = res.items || [];
       state.lanScanned = true;
-      if (res.subnet && $("lan-subnet-input") && !$("lan-subnet-input").value) {
-        $("lan-subnet-input").value = res.subnet;
-      }
-      if ($("lan-scan-meta")) {
-        $("lan-scan-meta").textContent =
-          state.lanItems.length + " service(s) détecté(s) sur " + (res.subnet || subnet) +
-          " (" + (res.scanned_ips || 0) + " IP analysées en " + (res.duration_ms || 0) + " ms)";
-      }
-      renderLANItems();
+      state.lanMeta = (res.subnet || "") + " · " + plural(res.scanned_ips || 0, "adresse vérifiée", "adresses vérifiées");
     } catch (e) {
-      if ($("lan-scan-meta")) $("lan-scan-meta").textContent = "Erreur scan LAN : " + e.message;
-      showToast("Erreur scan LAN : " + e.message, "err");
+      toast("Recherche sur le réseau impossible : " + e.message, "err");
+    } finally {
+      state.lanScanning = false;
+      renderFound();
     }
   }
 
-  function matchesLANCategory(item, cat) {
-    if (cat === "all") return true;
-    const k = item.suggested_probe?.kind || item.category || "";
-    if (cat === "hypervisor") return k === "proxmox";
-    if (cat === "nas") return k === "synology";
-    if (cat === "windows") return k === "windows_winrm" || k === "windows_exporter";
-    if (cat === "linux") return k === "linux_ssh" || k === "node_exporter";
-    if (cat === "exporter") return k === "node_exporter" || k === "windows_exporter";
-    if (cat === "web") return k === "http" || k === "tcp";
-    return true;
+  async function watchContainers(names) {
+    state.draft = ensureDraftShape(state.draft || state.config);
+    let probe = state.draft.probes.find((p) => p.kind === "docker");
+    if (probe) {
+      const set = new Set(probe.containers || []);
+      names.forEach((n) => set.add(n));
+      probe.containers = Array.from(set);
+      probe.socket = probe.socket || state.dockerSocket;
+    } else {
+      state.draft.probes.push({ id: "conteneurs-docker", kind: "docker", socket: state.dockerSocket, containers: names.slice(), interval: "30s", timeout: "10s" });
+    }
+    if (await saveConfiguration(false)) {
+      toast(names.length > 1 ? plural(names.length, "conteneur ajouté", "conteneurs ajoutés") + "." : names[0] + " est maintenant surveillé.");
+      await runDockerScan(true);
+    }
   }
 
-  function renderLANItems() {
-    const el = $("lan-list");
-    if (!el) return;
-    const cat = $("lan-category-filter")?.value || "all";
-    const items = (state.lanItems || []).filter((it) => matchesLANCategory(it, cat));
+  function renderFound() {
+    const box = $("found-list");
+    if (!box) return;
+    const containers = state.dockerContainers.filter((c) => !c.monitored);
+    const lan = (state.lanItems || []).filter((it) => !it.already_monitored && it.suggested_probe);
+    const rows = [];
 
-    if (!state.lanScanned) {
-      el.innerHTML = '<div class="empty-state">Lancez un scan pour découvrir Proxmox, NAS Synology, machines Windows/Linux et services HTTP.</div>';
-      return;
-    }
-    if (!items.length) {
-      el.innerHTML = '<div class="empty-state">Aucun hôte correspondant dans cette catégorie.</div>';
-      return;
-    }
-
-    el.innerHTML = items.map((it) => (
-      '<div class="surface-row">' +
-        '<div class="row-main">' +
-          '<div class="row-title-line">' +
-            '<span class="row-title">' + esc(it.name || it.hostname || it.ip) + "</span>" +
-            '<span class="chip">' + esc(it.category_label || it.suggested_probe?.kind || "Réseau") + "</span>" +
-            (it.already_monitored ? '<span class="badge ok">Déjà supervisé</span>' : "") +
-          "</div>" +
-          '<div class="row-sub">' + esc(it.ip) + (it.hostname && it.hostname !== it.ip ? " (" + esc(it.hostname) + ")" : "") + " · " + esc(it.summary) + "</div>" +
-        "</div>" +
-        '<div class="row-right">' +
-          '<button class="btn primary sm" type="button" data-lan-add="' + esc(it.key) + '">Configurer</button>' +
-        "</div>" +
-      "</div>"
-    )).join("");
-
-    el.querySelectorAll("[data-lan-add]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const found = (state.lanItems || []).find((it) => it.key === btn.dataset.lanAdd);
-        if (found?.suggested_probe) openProbeModalFromTemplate(clone(found.suggested_probe));
-      });
-    });
-  }
-
-  function renderManagedProbes() {
-    const el = $("managed-list");
-    if (!el || !state.draft) return;
-    const probes = state.draft.probes || [];
-    const q = ($("managed-filter-input")?.value || "").toLowerCase();
-    const list = probes.map((p, idx) => ({ p, idx })).filter(({ p }) => {
-      if (!q) return true;
-      return (p.id + " " + p.kind + " " + probeTargetLabel(p)).toLowerCase().includes(q);
-    });
-    if (!list.length) {
-      el.innerHTML = '<div class="empty-state">Aucune sonde configurée.</div>';
-      return;
-    }
-    const statusMap = {};
-    (state.status?.probes || []).forEach((s) => { statusMap[s.id] = s; });
-
-    el.innerHTML = list.map(({ p, idx }) => {
-      const rt = statusMap[p.id];
-      return (
-        '<div class="surface-row">' +
-          '<div class="row-main">' +
-            '<div class="row-title-line">' +
-              '<span class="status-dot ' + (rt ? (rt.ok ? "is-ok" : "is-err") : "is-muted") + '"></span>' +
-              '<span class="row-title">' + esc(p.id) + "</span>" +
-              '<span class="chip">' + esc(PROBE_KINDS[p.kind]?.label || p.kind) + "</span>" +
-            "</div>" +
-            '<div class="row-sub">' + esc(probeTargetLabel(p)) + (rt ? " · " + esc(rt.summary) : "") + "</div>" +
-          "</div>" +
-          '<div class="row-right">' +
-            '<button class="inline-action" type="button" data-mg-test="' + esc(p.id) + '">Tester</button>' +
-            '<button class="inline-action" type="button" data-mg-edit="' + idx + '">Modifier</button>' +
-            '<button class="inline-danger" type="button" data-mg-del="' + idx + '">Supprimer</button>' +
-          "</div>" +
+    containers.forEach((c) => {
+      rows.push(
+        '<div class="found-row">' +
+          '<span class="row-icon" aria-hidden="true"><span class="ms">deployed_code</span></span>' +
+          '<span class="row-main"><span class="row-title"><b>' + esc(c.name) + "</b></span>" +
+          '<span class="row-sub"><span>Conteneur Docker · ' + esc(c.image || "") + "</span></span></span>" +
+          '<span class="muted small">' + (c.running ? "Prêt" : "Arrêté") + "</span>" +
+          '<button class="btn sm" type="button" data-watch-container="' + esc(c.name) + '">Surveiller</button>' +
         "</div>"
       );
-    }).join("");
+    });
+    lan.forEach((it) => {
+      const k = it.suggested_probe.kind;
+      const needs = k === "proxmox" ? "Jeton requis" : k === "windows_winrm" || k === "linux_ssh" ? "Identifiants requis" : k === "synology" ? "SNMP à activer" : "Prêt";
+      rows.push(
+        '<div class="found-row">' +
+          '<span class="row-icon" aria-hidden="true"><span class="ms">' + kindIcon(k) + "</span></span>" +
+          '<span class="row-main"><span class="row-title"><b>' + esc(it.name || it.hostname || it.ip) + "</b></span>" +
+          '<span class="row-sub"><span>' + esc(it.category_label || kindLabel(k)) + ' · <span class="mono">' + esc(it.ip) + "</span></span></span></span>" +
+          '<span class="muted small">' + esc(needs) + "</span>" +
+          '<button class="btn sm" type="button" data-lan-add="' + esc(it.key) + '">Surveiller</button>' +
+        "</div>"
+      );
+    });
 
-    el.querySelectorAll("[data-mg-test]").forEach((b) => b.addEventListener("click", () => quickTestProbeByID(b.dataset.mgTest)));
-    el.querySelectorAll("[data-mg-edit]").forEach((b) => b.addEventListener("click", () => openProbeModal(Number(b.dataset.mgEdit))));
-    el.querySelectorAll("[data-mg-del]").forEach((b) => {
-      b.addEventListener("click", async () => {
-        const idx = Number(b.dataset.mgDel);
-        const removed = state.draft.probes.splice(idx, 1);
-        await saveConfiguration(false);
-        showToast("Sonde supprimée : " + (removed[0]?.id || ""));
-      });
+    const LIMIT = 5;
+    const hiddenCount = Math.max(0, rows.length - LIMIT);
+    if (hiddenCount && !state.foundExpanded) {
+      rows.length = LIMIT;
+      rows.push('<div class="card-foot"><button class="link-btn" type="button" id="found-more">Voir les ' + hiddenCount + " autres</button></div>");
+    }
+    if (state.lanScanning) {
+      rows.push('<div class="empty"><span class="spinner" aria-hidden="true"></span><span>Recherche sur votre réseau… cela prend quelques secondes.</span></div>');
+    } else if (!rows.length) {
+      rows.push('<div class="empty">' + (state.lanScanned ? "Rien de nouveau trouvé : tout ce qui a été détecté est déjà surveillé." : "Aucun conteneur Docker nouveau. Lancez une recherche sur le réseau pour trouver NAS, serveurs et PC.") + "</div>");
+    }
+    box.innerHTML = rows.join("");
+    $("found-more")?.addEventListener("click", () => { state.foundExpanded = true; renderFound(); });
+
+    $("found-meta").textContent = state.lanScanned ? state.lanMeta || "" : (state.dockerContainers.length ? "Docker de cette machine" : "");
+    const scanBtn = $("found-lan-scan");
+    if (scanBtn) {
+      scanBtn.disabled = state.lanScanning;
+      scanBtn.innerHTML = '<span class="ms">wifi_find</span>' + (state.lanScanned ? "Chercher à nouveau" : "Chercher sur le réseau");
+    }
+    const foot = $("found-foot");
+    foot.hidden = containers.length < 2;
+    $("found-foot-text").textContent = containers.length >= 2 ? "Les " + containers.length + " conteneurs se surveillent sans rien saisir." : "";
+  }
+
+  /* -------------------- Assistant d'ajout -------------------- */
+
+  function openWizard(editIndex = -1, template = null) {
+    state.lastFocus = document.activeElement;
+    state.wizard = { open: true, step: 1, kind: "", editIndex, testedOK: false };
+    state.foundExpanded = false;
+    $("wizard").hidden = false;
+    renderTypeGrids();
+    if (editIndex >= 0 && state.draft?.probes?.[editIndex]) {
+      const p = clone(state.draft.probes[editIndex]);
+      showWizardForm(p.kind || "http", p);
+    } else if (template) {
+      showWizardForm(template.kind || "http", template);
+    } else {
+      showWizardPick();
+      if (!state.dockerContainers.length && state.discoverInfo?.docker_available) runDockerScan(true);
+    }
+  }
+
+  function closeWizard() {
+    $("wizard").hidden = true;
+    state.wizard.open = false;
+    state.lastFocus?.focus?.();
+  }
+
+  function setWizardStep(step) {
+    state.wizard.step = step;
+    $$("#wizard-stepper li[data-step]").forEach((li) => {
+      const n = Number(li.dataset.step);
+      li.classList.toggle("on", n === step);
+      li.classList.toggle("done", n < step);
+      li.querySelector(".step-num").innerHTML = n < step ? CHECK : String(n);
+      if (n === step) li.setAttribute("aria-current", "step");
+      else li.removeAttribute("aria-current");
     });
   }
 
-  /* -------------------- Probe Modal (All 10 ProbeDTO Kinds) -------------------- */
-
-  function openProbeModal(editIndex = -1) {
-    state.editingIndex = editIndex;
-    const modal = $("probe-modal");
-    if (!modal) return;
-    $("probe-test-banner").hidden = true;
-
-    if (editIndex >= 0 && state.draft?.probes?.[editIndex]) {
-      const p = clone(state.draft.probes[editIndex]);
-      showProbeForm(p.kind || "http", p, "Modifier « " + p.id + " »");
-    } else {
-      $("probe-modal-title").textContent = "Nouvelle sonde";
-      $("probe-modal-sub").textContent = "Choisissez le type de machine, d'hyperviseur ou de service à surveiller.";
-      $("probe-step-kind").hidden = false;
-      $("probe-form").hidden = true;
-    }
-    modal.hidden = false;
+  function renderTypeGrids() {
+    const card = ([k, v]) => '<button class="type" type="button" data-pick-kind="' + k + '"><span class="ms" aria-hidden="true">' + v.icon + "</span><b>" + esc(v.label) + "</b><span>" + esc(v.desc) + "</span></button>";
+    $("type-grid").innerHTML = Object.entries(KINDS).filter(([, v]) => !v.advanced).map(card).join("");
+    $("type-grid-adv").innerHTML = Object.entries(KINDS).filter(([, v]) => v.advanced).map(card).join("");
   }
 
-  function openProbeModalFromTemplate(tmpl) {
-    state.editingIndex = -1;
-    const modal = $("probe-modal");
-    if (!modal) return;
-    $("probe-test-banner").hidden = true;
-    showProbeForm(tmpl.kind || "http", tmpl, "Configurer « " + (tmpl.id || "nouvelle sonde") + " »");
-    modal.hidden = false;
+  function showWizardPick() {
+    setWizardStep(1);
+    $("wizard-title").textContent = "Ajouter un appareil";
+    $("wizard-sub").textContent = "Que voulez-vous surveiller ? On a déjà cherché sur votre réseau.";
+    $("wizard-stepper").hidden = false;
+    $("wizard-step-pick").hidden = false;
+    $("wizard-step-form").hidden = true;
+    $("wizard-back").hidden = true;
+    $("wizard-submit").hidden = true;
+    $("wizard-save-anyway").hidden = true;
+    $("wizard-foot-text").textContent = "Rien n'est ajouté tant que vous n'avez pas testé la connexion.";
+    renderFound();
   }
 
-  function syncSNMPVersionFields() {
-    const ver = $("pf-snmp-version")?.value || "2c";
-    const v2El = $("pf-snmp-v2");
-    const v3El = $("pf-snmp-v3");
-    if (v2El) v2El.hidden = ver === "3";
-    if (v3El) v3El.hidden = ver !== "3";
+  function fieldHTML(id, label, input, hint) {
+    return '<label class="field" for="' + id + '"><span>' + esc(label) + "</span>" + input + (hint ? "<small>" + esc(hint) + "</small>" : "") + "</label>";
   }
 
-  function snmpFieldsHTML(preset) {
-    const ver = String(preset.snmp_version || "2c") === "3" ? "3" : "2c";
-    const authOpts = ["NONE", "MD5", "SHA", "SHA256", "SHA512"]
-      .map((a) => '<option value="' + a + '"' + ((preset.auth_proto || "SHA256").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>")
-      .join("");
-    const privOpts = ["NONE", "DES", "AES", "AES192", "AES256"]
-      .map((a) => '<option value="' + a + '"' + ((preset.priv_proto || "AES").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>")
-      .join("");
+  function inp(id, value, opts = {}) {
+    const type = opts.type || "text";
+    return '<input class="input' + (opts.mono ? " mono" : "") + '" type="' + type + '" id="' + id + '" value="' + esc(value == null ? "" : value) + '"' +
+      (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") +
+      (opts.required ? " required" : "") + (opts.step ? ' step="' + opts.step + '"' : "") +
+      ' autocomplete="off" spellcheck="false" />';
+  }
 
+  function secretInp(id, value, placeholder) {
+    return '<span class="input-group">' + inp(id, value, { type: "password", placeholder, mono: true }) + '<button class="btn sm ghost" type="button" data-reveal="' + id + '">Afficher</button></span>';
+  }
+
+  function thresholdsHTML(p, which, defaults = {}) {
+    const parts = [];
+    if (which.includes("cpu")) parts.push(fieldHTML("pf-max-cpu", "Alerte processeur au-delà de (%)", inp("pf-max-cpu", p.max_cpu_percent || defaults.cpu || 90, { type: "number" })));
+    if (which.includes("ram")) parts.push(fieldHTML("pf-max-ram", "Alerte mémoire au-delà de (%)", inp("pf-max-ram", p.max_ram_percent || defaults.ram || 90, { type: "number" })));
+    if (which.includes("disk")) parts.push(fieldHTML("pf-max-disk", "Alerte disque au-delà de (%)", inp("pf-max-disk", p.max_disk_percent || defaults.disk || 90, { type: "number" })));
+    return '<div class="form-3">' + parts.join("") + "</div>";
+  }
+
+  function snmpHTML(p) {
+    const ver = String(p.snmp_version || "2c") === "3" ? "3" : "2c";
+    const opt = (list, cur) => list.map((a) => '<option value="' + a + '"' + (String(cur || "").toUpperCase() === a ? " selected" : "") + ">" + a + "</option>").join("");
     return (
-      '<div class="form-grid three-col">' +
-        '<label class="field"><span class="field-label">IP / Hôte SNMP</span><input type="text" id="pf-host" value="' + esc(preset.host || "") + '" placeholder="192.168.1.20" required /></label>' +
-        '<label class="field"><span class="field-label">Port UDP</span><input type="number" id="pf-port" value="' + esc(preset.port || 161) + '" /></label>' +
-        '<label class="field"><span class="field-label">Version SNMP</span><select id="pf-snmp-version"><option value="2c"' + (ver === "2c" ? " selected" : "") + '>SNMP v2c</option><option value="3"' + (ver === "3" ? " selected" : "") + ">SNMP v3 (chiffré)</option></select></label>" +
+      '<div class="form-3">' +
+        fieldHTML("pf-host", "Adresse IP ou nom", inp("pf-host", p.host, { placeholder: "192.168.1.20", required: true })) +
+        fieldHTML("pf-port", "Port", inp("pf-port", p.port || 161, { type: "number" })) +
+        fieldHTML("pf-snmp-version", "Version SNMP", '<select class="input" id="pf-snmp-version"><option value="2c"' + (ver === "2c" ? " selected" : "") + '>v2c (simple)</option><option value="3"' + (ver === "3" ? " selected" : "") + ">v3 (chiffré)</option></select>") +
       "</div>" +
-      '<div id="pf-snmp-v2"' + (ver === "3" ? " hidden" : "") + ">" +
-        '<label class="field"><span class="field-label">Communauté SNMP</span><input type="text" id="pf-community" value="' + esc(preset.community || "public") + '" /></label>' +
-      "</div>" +
-      '<div id="pf-snmp-v3" class="form-grid"' + (ver === "3" ? "" : " hidden") + ">" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Utilisateur SNMPv3</span><input type="text" id="pf-snmp-user" value="' + esc(preset.user || "") + '" /></label>' +
-          '<label class="field"><span class="field-label">Protocole Auth</span><select id="pf-auth-proto">' + authOpts + "</select></label>" +
-          '<label class="field"><span class="field-label">Mot de passe Auth</span><input type="password" id="pf-auth-pass" value="' + esc(preset.auth_pass || "") + '" /></label>' +
+      '<div id="pf-snmp-v2"' + (ver === "3" ? " hidden" : "") + ">" + fieldHTML("pf-community", "Communauté", inp("pf-community", p.community || "public"), "« public » par défaut sur la plupart des appareils.") + "</div>" +
+      '<div id="pf-snmp-v3" class="stack"' + (ver === "3" ? "" : " hidden") + ">" +
+        '<div class="form-3">' +
+          fieldHTML("pf-snmp-user", "Utilisateur", inp("pf-snmp-user", p.user)) +
+          fieldHTML("pf-auth-proto", "Authentification", '<select class="input" id="pf-auth-proto">' + opt(["NONE", "MD5", "SHA", "SHA256", "SHA512"], p.auth_proto || "SHA256") + "</select>") +
+          fieldHTML("pf-auth-pass", "Mot de passe", secretInp("pf-auth-pass", p.auth_pass)) +
         "</div>" +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Protocole Chiffrement</span><select id="pf-priv-proto">' + privOpts + "</select></label>" +
-          '<label class="field"><span class="field-label">Mot de passe Priv</span><input type="password" id="pf-priv-pass" value="' + esc(preset.priv_pass || "") + '" /></label>' +
+        '<div class="form-2">' +
+          fieldHTML("pf-priv-proto", "Chiffrement", '<select class="input" id="pf-priv-proto">' + opt(["NONE", "DES", "AES", "AES192", "AES256"], p.priv_proto || "AES") + "</select>") +
+          fieldHTML("pf-priv-pass", "Mot de passe de chiffrement", secretInp("pf-priv-pass", p.priv_pass)) +
         "</div>" +
       "</div>"
     );
   }
 
-  function showProbeForm(kind, preset = {}, titleOverride = null) {
-    state.modalKind = kind;
-    $("probe-step-kind").hidden = true;
-    $("probe-form").hidden = false;
-    $("probe-back-kind-btn").hidden = state.editingIndex >= 0;
-    $("probe-modal-title").textContent = titleOverride || ("Nouvelle sonde · " + (PROBE_KINDS[kind]?.label || kind));
-    $("probe-modal-sub").textContent = PROBE_KINDS[kind]?.label || kind;
+  function showWizardForm(kind, p = {}) {
+    const w = state.wizard;
+    w.kind = kind;
+    w.testedOK = false;
+    const editing = w.editIndex >= 0;
+    setWizardStep(2);
+    $("wizard-title").textContent = editing ? "Modifier " + p.id : kindLabel(kind);
+    $("wizard-sub").textContent = editing ? kindLabel(kind) : KINDS[kind]?.desc || "";
+    $("wizard-stepper").hidden = false;
+    $("wizard-step-pick").hidden = true;
+    $("wizard-step-form").hidden = false;
+    $("wizard-back").hidden = editing;
+    $("wizard-submit").hidden = false;
+    $("wizard-save-anyway").hidden = true;
+    $("wizard-submit-text").textContent = "Tester et enregistrer";
+    $("wizard-foot-text").textContent = "";
+    $("wizard-test").hidden = true;
 
-    const guide = PROBE_GUIDES[kind];
-    const gBox = $("probe-guide-box");
-    if (gBox) {
-      gBox.hidden = !guide;
-      gBox.textContent = guide || "";
-    }
+    const guide = GUIDES[kind];
+    const gb = $("wizard-guide");
+    gb.hidden = !guide;
+    gb.innerHTML = guide ? '<span class="ms" aria-hidden="true">info</span><span>' + esc(guide) + "</span>" : "";
 
-    $("pf-interval").value = preset.interval || (kind === "http" || kind === "tcp" || kind === "docker" ? "30s" : "1m");
-    $("pf-timeout").value = preset.timeout || (kind === "windows_winrm" || kind === "linux_ssh" ? "15s" : "10s");
-    $("pf-insecure").checked = Boolean(preset.insecure_skip_verify);
+    $("pf-interval").value = p.interval || (kind === "http" || kind === "tcp" || kind === "docker" ? "30s" : "1m");
+    $("pf-timeout").value = p.timeout || (kind === "windows_winrm" || kind === "linux_ssh" ? "15s" : "10s");
+    $("pf-insecure").checked = Boolean(p.insecure_skip_verify);
 
-    const fields = $("probe-form-fields");
-    let html =
-      '<label class="field">' +
-        '<span class="field-label">Nom affiché (identifiant unique)</span>' +
-        '<input type="text" id="pf-id" value="' + esc(preset.id || "") + '" placeholder="Ex. proxmox-principal" required />' +
-      "</label>";
+    let h = fieldHTML("pf-id", "Nom affiché", inp("pf-id", p.id, { placeholder: "Ex. nas-salon" }), editing ? "" : "Laissez vide : on le déduira de l'adresse.");
 
     if (kind === "http") {
-      html +=
-        '<label class="field"><span class="field-label">URL cible</span><input type="url" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="https://mon-service.local" required /></label>' +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Code HTTP attendu</span><input type="number" id="pf-http-status" value="' + esc(preset.expected_status || 200) + '" /></label>' +
-          '<label class="field"><span class="field-label">Texte attendu (opt.)</span><input type="text" id="pf-contains" value="' + esc(preset.contains || "") + '" placeholder="healthy" /></label>' +
-          '<label class="field"><span class="field-label">Alerte TLS (jours)</span><input type="number" id="pf-tls-days" value="' + esc(preset.tls_min_days != null ? preset.tls_min_days : 14) + '" /></label>' +
-        "</div>";
+      h += fieldHTML("pf-url", "Adresse du site", inp("pf-url", p.url, { type: "url", placeholder: "https://jellyfin.maison.lan", required: true }));
+      h += '<details class="fold"><summary>Vérifications en plus</summary><div class="form-3">' +
+        fieldHTML("pf-http-status", "Code de réponse attendu", inp("pf-http-status", p.expected_status || 200, { type: "number" })) +
+        fieldHTML("pf-contains", "Texte qui doit apparaître", inp("pf-contains", p.contains, { placeholder: "facultatif" })) +
+        fieldHTML("pf-tls-days", "Prévenir avant expiration du certificat (jours)", inp("pf-tls-days", p.tls_min_days != null ? p.tls_min_days : 14, { type: "number" })) +
+        "</div></details>";
     } else if (kind === "tcp") {
-      const hp = preset.host ? { host: preset.host, port: preset.port || 22 } : splitHostPort(preset.address, 22);
-      html +=
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Hôte / IP</span><input type="text" id="pf-host" value="' + esc(hp.host) + '" placeholder="192.168.1.10" required /></label>' +
-          '<label class="field"><span class="field-label">Port TCP</span><input type="number" id="pf-port" value="' + esc(hp.port || 22) + '" required /></label>' +
-        "</div>";
+      const hp = p.host ? { host: p.host, port: p.port || 22 } : splitHostPort(p.address, 22);
+      h += '<div class="form-2">' + fieldHTML("pf-host", "Adresse IP ou nom", inp("pf-host", hp.host, { placeholder: "192.168.1.10", required: true })) + fieldHTML("pf-port", "Port", inp("pf-port", hp.port || 22, { type: "number", required: true })) + "</div>";
     } else if (kind === "docker") {
-      html +=
-        '<label class="field"><span class="field-label">Socket Docker</span><input type="text" id="pf-socket" value="' + esc(preset.socket || "/var/run/docker.sock") + '" /></label>' +
-        '<label class="field"><span class="field-label">Conteneurs à surveiller (séparés par virgule)</span><input type="text" id="pf-containers" value="' + esc((preset.containers || []).join(", ")) + '" placeholder="traefik, postgres, caddy" /></label>' +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Label filtre (opt.)</span><input type="text" id="pf-label" value="' + esc(preset.label || "") + '" placeholder="meshwatch.enable=true" /></label>' +
-          '<label class="field"><span class="field-label">Restarts max tolérés (opt.)</span><input type="number" id="pf-max-restarts" value="' + esc(preset.max_restarts || "") + '" placeholder="0" /></label>' +
-        "</div>";
+      h += fieldHTML("pf-containers", "Conteneurs à surveiller", inp("pf-containers", (p.containers || []).join(", "), { placeholder: "traefik, immich-server" }), "Séparés par des virgules. Laissez vide pour tous.");
+      h += '<details class="fold"><summary>Options Docker</summary><div class="form-3">' +
+        fieldHTML("pf-socket", "Socket Docker", inp("pf-socket", p.socket || state.dockerSocket, { mono: true })) +
+        fieldHTML("pf-label", "Seulement avec l'étiquette", inp("pf-label", p.label, { placeholder: "meshwatch.enable=true" })) +
+        fieldHTML("pf-max-restarts", "Redémarrages tolérés", inp("pf-max-restarts", p.max_restarts || "", { type: "number", placeholder: "0" })) +
+        "</div></details>";
     } else if (kind === "synology") {
-      html += snmpFieldsHTML(preset) +
-        '<label class="field"><span class="field-label">Température maximale disques/système (°C)</span><input type="number" id="pf-max-temp" value="' + esc(preset.max_temp_c || 55) + '" /></label>';
+      h += snmpHTML(p) + fieldHTML("pf-max-temp", "Alerte température au-delà de (°C)", inp("pf-max-temp", p.max_temp_c || 55, { type: "number" }));
     } else if (kind === "snmp_oid") {
-      html += snmpFieldsHTML(preset) +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">OID SNMP</span><input type="text" id="pf-oid" class="mono" value="' + esc(preset.oid || ".1.3.6.1.2.1.1.3.0") + '" required /></label>' +
-          '<label class="field"><span class="field-label">Valeur attendue (opt.)</span><input type="text" id="pf-expected-value" value="' + esc(preset.expected_value || "") + '" /></label>' +
-        "</div>" +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Valeur min (opt.)</span><input type="number" step="any" id="pf-min-value" value="' + esc(preset.min_value != null ? preset.min_value : "") + '" /></label>' +
-          '<label class="field"><span class="field-label">Valeur max (opt.)</span><input type="number" step="any" id="pf-max-value" value="' + esc(preset.max_value != null ? preset.max_value : "") + '" /></label>' +
-        "</div>";
+      h += snmpHTML(p) +
+        '<div class="form-2">' + fieldHTML("pf-oid", "OID à lire", inp("pf-oid", p.oid || ".1.3.6.1.2.1.1.3.0", { mono: true, required: true })) + fieldHTML("pf-expected-value", "Valeur attendue", inp("pf-expected-value", p.expected_value, { placeholder: "facultatif" })) + "</div>" +
+        '<div class="form-2">' + fieldHTML("pf-min-value", "Minimum", inp("pf-min-value", p.min_value != null ? p.min_value : "", { type: "number", step: "any", placeholder: "facultatif" })) + fieldHTML("pf-max-value", "Maximum", inp("pf-max-value", p.max_value != null ? p.max_value : "", { type: "number", step: "any", placeholder: "facultatif" })) + "</div>";
     } else if (kind === "proxmox") {
-      html +=
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">IP ou URL Proxmox VE</span><input type="text" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="https://192.168.1.10:8006" required /></label>' +
-          '<label class="field"><span class="field-label">Nœud Proxmox (opt.)</span><input type="text" id="pf-node" value="' + esc(preset.node || "") + '" placeholder="pve (tous si vide)" /></label>' +
-        "</div>" +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Token ID</span><input type="text" id="pf-token-id" class="mono" value="' + esc(preset.token_id || "") + '" placeholder="root@pam!meshwatch" /></label>' +
-          '<label class="field"><span class="field-label">Token Secret</span><input type="password" id="pf-token-secret" class="mono" value="' + esc(preset.token_secret || "") + '" /></label>' +
-        "</div>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
-        "</div>" +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">VM ou conteneurs LXC critiques (VMID ou noms)</span><input type="text" id="pf-vms" value="' + esc((preset.vms || []).join(", ")) + '" placeholder="100, 101" /></label>' +
-          '<label class="field"><span class="field-label">Stockages surveillés (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="local, local-lvm" /></label>' +
-        "</div>";
+      h += '<div class="form-2">' + fieldHTML("pf-url", "Adresse de Proxmox", inp("pf-url", p.url, { placeholder: "https://192.168.1.10:8006", required: true })) + fieldHTML("pf-node", "Nœud", inp("pf-node", p.node, { placeholder: "tous si vide" })) + "</div>";
+      h += '<div class="form-2">' + fieldHTML("pf-token-id", "Identifiant du jeton", inp("pf-token-id", p.token_id, { mono: true, placeholder: "root@pam!meshwatch", required: true })) + fieldHTML("pf-token-secret", "Secret du jeton", secretInp("pf-token-secret", p.token_secret)) + "</div>";
+      h += '<details class="fold"><summary>Seuils et VM importantes</summary><div class="stack">' + thresholdsHTML(p, ["cpu", "ram", "disk"]) +
+        '<div class="form-2">' + fieldHTML("pf-vms", "VM ou LXC qui doivent tourner", inp("pf-vms", (p.vms || []).join(", "), { placeholder: "100, 101 ou leurs noms" })) + fieldHTML("pf-disks", "Stockages à surveiller", inp("pf-disks", (p.disks || []).join(", "), { placeholder: "local, local-lvm" })) + "</div></div></details>";
     } else if (kind === "windows_winrm") {
-      html +=
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Hôte ou IP Windows</span><input type="text" id="pf-host" value="' + esc(preset.host || "") + '" placeholder="192.168.1.40" required /></label>' +
-          '<label class="field"><span class="field-label">Port WinRM</span><input type="number" id="pf-port" value="' + esc(preset.port || 5985) + '" /></label>' +
-          '<label class="field" style="justify-content:flex-end;"><span class="checkbox-line"><input type="checkbox" id="pf-use-https"' + (preset.use_https ? " checked" : "") + ' /><span>WinRM HTTPS (5986)</span></span></label>' +
-        "</div>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Utilisateur Windows</span><input type="text" id="pf-user" value="' + esc(preset.user || "Administrator") + '" /></label>' +
-          '<label class="field"><span class="field-label">Mot de passe</span><input type="password" id="pf-password" value="' + esc(preset.password || "") + '" /></label>' +
-          '<label class="field"><span class="field-label">Domaine AD (opt.)</span><input type="text" id="pf-domain" value="' + esc(preset.domain || "") + '" placeholder="CORP" /></label>' +
-        "</div>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
-        "</div>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">VMs Hyper-V (opt.)</span><input type="text" id="pf-vms" value="' + esc((preset.vms || []).join(", ")) + '" placeholder="DC01, SQL01" /></label>' +
-          '<label class="field"><span class="field-label">Services Windows (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="W3SVC, Spooler" /></label>' +
-          '<label class="field"><span class="field-label">Lecteurs (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="C:, D:" /></label>' +
-        "</div>";
+      h += '<div class="form-3">' + fieldHTML("pf-host", "Adresse IP ou nom", inp("pf-host", p.host, { placeholder: "192.168.1.40", required: true })) + fieldHTML("pf-user", "Utilisateur", inp("pf-user", p.user || "Administrator")) + fieldHTML("pf-password", "Mot de passe", secretInp("pf-password", p.password)) + "</div>";
+      h += '<details class="fold"><summary>Connexion, seuils, services</summary><div class="stack">' +
+        '<div class="form-3">' + fieldHTML("pf-port", "Port WinRM", inp("pf-port", p.port || 5985, { type: "number" })) + fieldHTML("pf-domain", "Domaine", inp("pf-domain", p.domain, { placeholder: "facultatif" })) + '<label class="check"><input type="checkbox" id="pf-use-https"' + (p.use_https ? " checked" : "") + " /><span>Connexion HTTPS (port 5986)</span></label></div>" +
+        thresholdsHTML(p, ["cpu", "ram", "disk"]) +
+        '<div class="form-3">' + fieldHTML("pf-vms", "VM Hyper-V qui doivent tourner", inp("pf-vms", (p.vms || []).join(", "), { placeholder: "DC01, SQL01" })) + fieldHTML("pf-services", "Services Windows", inp("pf-services", (p.services || []).join(", "), { placeholder: "W3SVC, Spooler" })) + fieldHTML("pf-disks", "Lecteurs", inp("pf-disks", (p.disks || []).join(", "), { placeholder: "C:, D:" })) + "</div>" +
+        "</div></details>";
     } else if (kind === "linux_ssh") {
-      html +=
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Hôte ou IP SSH</span><input type="text" id="pf-host" value="' + esc(preset.host || "") + '" placeholder="192.168.1.45" required /></label>' +
-          '<label class="field"><span class="field-label">Port SSH</span><input type="number" id="pf-port" value="' + esc(preset.port || 22) + '" /></label>' +
-          '<label class="field"><span class="field-label">Utilisateur SSH</span><input type="text" id="pf-user" value="' + esc(preset.user || "root") + '" /></label>' +
-        "</div>" +
-        '<label class="field"><span class="field-label">Mot de passe SSH (ou laissez vide si clé)</span><input type="password" id="pf-password" value="' + esc(preset.password || "") + '" /></label>' +
-        '<label class="field"><span class="field-label">Clé privée SSH PEM / OpenSSH (optionnel)</span><textarea id="pf-ssh-key" rows="3" class="mono" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----">' + esc(preset.ssh_key || "") + "</textarea></label>" +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil CPU (%)</span><input type="number" id="pf-max-cpu" value="' + esc(preset.max_cpu_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
-        "</div>" +
-        '<div class="form-grid two-col">' +
-          '<label class="field"><span class="field-label">Services systemd critiques (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="docker, nginx" /></label>' +
-          '<label class="field"><span class="field-label">Points de montage (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="/, /var" /></label>' +
-        "</div>";
+      h += '<div class="form-3">' + fieldHTML("pf-host", "Adresse IP ou nom", inp("pf-host", p.host, { placeholder: "192.168.1.45", required: true })) + fieldHTML("pf-user", "Utilisateur", inp("pf-user", p.user || "root")) + fieldHTML("pf-password", "Mot de passe", secretInp("pf-password", p.password, "ou une clé ci-dessous")) + "</div>";
+      h += '<details class="fold"' + (p.ssh_key ? " open" : "") + '><summary>Se connecter avec une clé SSH</summary>' + fieldHTML("pf-ssh-key", "Clé privée", '<textarea class="input mono" id="pf-ssh-key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" spellcheck="false">' + esc(p.ssh_key || "") + "</textarea>") + "</details>";
+      h += '<details class="fold"><summary>Port, seuils, services</summary><div class="stack">' +
+        '<div class="form-3">' + fieldHTML("pf-port", "Port SSH", inp("pf-port", p.port || 22, { type: "number" })) + "</div>" +
+        thresholdsHTML(p, ["cpu", "ram", "disk"]) +
+        '<div class="form-2">' + fieldHTML("pf-services", "Services qui doivent tourner", inp("pf-services", (p.services || []).join(", "), { placeholder: "docker, nginx" })) + fieldHTML("pf-disks", "Points de montage", inp("pf-disks", (p.disks || []).join(", "), { placeholder: "/, /var" })) + "</div>" +
+        "</div></details>";
     } else if (kind === "node_exporter" || kind === "windows_exporter") {
-      const defPort = kind === "windows_exporter" ? "9182" : "9100";
-      html +=
-        '<label class="field"><span class="field-label">URL Metrics Exporter</span><input type="url" id="pf-url" value="' + esc(preset.url || "") + '" placeholder="http://192.168.1.10:' + defPort + '/metrics" required /></label>' +
-        '<div class="form-grid three-col">' +
-          '<label class="field"><span class="field-label">Seuil RAM (%)</span><input type="number" id="pf-max-ram" value="' + esc(preset.max_ram_percent || 92) + '" /></label>' +
-          '<label class="field"><span class="field-label">Seuil Disque (%)</span><input type="number" id="pf-max-disk" value="' + esc(preset.max_disk_percent || 90) + '" /></label>' +
-          '<label class="field"><span class="field-label">Disques / montages (opt.)</span><input type="text" id="pf-disks" value="' + esc((preset.disks || []).join(", ")) + '" placeholder="' + (kind === "windows_exporter" ? "C:, D:" : "/, /home") + '" /></label>' +
-        "</div>";
-      if (kind === "windows_exporter") {
-        html += '<label class="field"><span class="field-label">Services Windows critiques (opt.)</span><input type="text" id="pf-services" value="' + esc((preset.services || []).join(", ")) + '" placeholder="W3SVC, W32Time" /></label>';
-      }
+      const port = kind === "windows_exporter" ? "9182" : "9100";
+      h += fieldHTML("pf-url", "Adresse des métriques", inp("pf-url", p.url, { type: "url", placeholder: "http://192.168.1.10:" + port + "/metrics", required: true }));
+      h += '<details class="fold"><summary>Seuils</summary><div class="stack">' + thresholdsHTML(p, ["ram", "disk"], { ram: 92 }) +
+        '<div class="form-2">' + fieldHTML("pf-disks", "Disques", inp("pf-disks", (p.disks || []).join(", "), { placeholder: kind === "windows_exporter" ? "C:, D:" : "/, /home" })) +
+        (kind === "windows_exporter" ? fieldHTML("pf-services", "Services Windows", inp("pf-services", (p.services || []).join(", "), { placeholder: "W3SVC" })) : "") + "</div></div></details>";
     }
 
-    fields.innerHTML = html;
-    $("pf-snmp-version")?.addEventListener("change", syncSNMPVersionFields);
+    $("wizard-fields").innerHTML = h;
+    $("pf-snmp-version")?.addEventListener("change", () => {
+      const v3 = $("pf-snmp-version").value === "3";
+      $("pf-snmp-v2").hidden = v3;
+      $("pf-snmp-v3").hidden = !v3;
+    });
+    $$("#wizard-fields input, #wizard-fields textarea, #wizard-fields select").forEach((el) => el.addEventListener("input", () => {
+      if (state.wizard.step === 3) {
+        setWizardStep(2);
+        $("wizard-test").hidden = true;
+        $("wizard-save-anyway").hidden = true;
+        $("wizard-submit-text").textContent = "Tester et enregistrer";
+      }
+      el.classList.remove("invalid");
+    }));
+    const first = $("wizard-fields").querySelector("[required]") || $("pf-id");
+    setTimeout(() => first?.focus(), 40);
   }
 
-  function readSNMPFields(obj) {
-    obj.host = ($("pf-host")?.value || "").trim();
-    obj.port = Number($("pf-port")?.value) || 161;
-    obj.snmp_version = $("pf-snmp-version")?.value || "2c";
+  const val = (id) => ($(id)?.value || "").trim();
+
+  function readSNMP(obj) {
+    obj.host = val("pf-host");
+    obj.port = Number(val("pf-port")) || 161;
+    obj.snmp_version = val("pf-snmp-version") || "2c";
     if (obj.snmp_version === "3") {
-      obj.user = ($("pf-snmp-user")?.value || "").trim();
-      obj.auth_proto = $("pf-auth-proto")?.value || "SHA256";
+      obj.user = val("pf-snmp-user");
+      obj.auth_proto = val("pf-auth-proto") || "SHA256";
       obj.auth_pass = $("pf-auth-pass")?.value || "";
-      obj.priv_proto = $("pf-priv-proto")?.value || "AES";
+      obj.priv_proto = val("pf-priv-proto") || "AES";
       obj.priv_pass = $("pf-priv-pass")?.value || "";
     } else {
-      obj.community = ($("pf-community")?.value || "public").trim();
+      obj.community = val("pf-community") || "public";
     }
   }
 
-  function readProbeFormObject() {
-    const kind = state.modalKind;
-    const obj = {
-      id: ($("pf-id")?.value || "").trim(),
-      kind,
-      interval: ($("pf-interval")?.value || "").trim() || "1m",
-      timeout: ($("pf-timeout")?.value || "").trim() || "10s"
-    };
+  function readWizardProbe() {
+    const kind = state.wizard.kind;
+    const o = { id: val("pf-id"), kind, interval: val("pf-interval") || "1m", timeout: val("pf-timeout") || "10s" };
+    const num = (id) => Number(val(id)) || 0;
 
     if (kind === "http") {
-      obj.url = ($("pf-url")?.value || "").trim();
-      obj.expected_status = Number($("pf-http-status")?.value) || 200;
-      const contains = ($("pf-contains")?.value || "").trim();
-      if (contains) obj.contains = contains;
-      const tlsRaw = ($("pf-tls-days")?.value || "").trim();
-      if (tlsRaw !== "") obj.tls_min_days = Number(tlsRaw);
-      obj.insecure_skip_verify = Boolean($("pf-insecure")?.checked);
+      o.url = val("pf-url");
+      o.expected_status = num("pf-http-status") || 200;
+      if (val("pf-contains")) o.contains = val("pf-contains");
+      if (val("pf-tls-days") !== "") o.tls_min_days = Number(val("pf-tls-days"));
+      o.insecure_skip_verify = $("pf-insecure").checked;
     } else if (kind === "tcp") {
-      const hostVal = ($("pf-host")?.value || "").trim();
-      const portVal = Number($("pf-port")?.value) || 22;
-      obj.host = hostVal;
-      obj.port = portVal;
-      obj.address = hostVal ? hostVal + ":" + portVal : "";
+      o.host = val("pf-host");
+      o.port = num("pf-port") || 22;
+      o.address = o.host ? o.host + ":" + o.port : "";
     } else if (kind === "docker") {
-      obj.socket = ($("pf-socket")?.value || "/var/run/docker.sock").trim();
-      obj.containers = splitCSV($("pf-containers")?.value);
-      const lbl = ($("pf-label")?.value || "").trim();
-      if (lbl) obj.label = lbl;
-      const mr = Number($("pf-max-restarts")?.value);
-      if (mr > 0) obj.max_restarts = mr;
+      o.socket = val("pf-socket") || state.dockerSocket;
+      o.containers = splitCSV(val("pf-containers"));
+      if (val("pf-label")) o.label = val("pf-label");
+      if (num("pf-max-restarts") > 0) o.max_restarts = num("pf-max-restarts");
     } else if (kind === "synology") {
-      readSNMPFields(obj);
-      obj.max_temp_c = Number($("pf-max-temp")?.value) || 55;
+      readSNMP(o);
+      o.max_temp_c = num("pf-max-temp") || 55;
     } else if (kind === "snmp_oid") {
-      readSNMPFields(obj);
-      obj.oid = ($("pf-oid")?.value || "").trim();
-      const ev = ($("pf-expected-value")?.value || "").trim();
-      if (ev) obj.expected_value = ev;
-      const minRaw = ($("pf-min-value")?.value || "").trim();
-      if (minRaw !== "" && !Number.isNaN(Number(minRaw))) obj.min_value = Number(minRaw);
-      const maxRaw = ($("pf-max-value")?.value || "").trim();
-      if (maxRaw !== "" && !Number.isNaN(Number(maxRaw))) obj.max_value = Number(maxRaw);
+      readSNMP(o);
+      o.oid = val("pf-oid");
+      if (val("pf-expected-value")) o.expected_value = val("pf-expected-value");
+      if (val("pf-min-value") !== "" && !Number.isNaN(Number(val("pf-min-value")))) o.min_value = Number(val("pf-min-value"));
+      if (val("pf-max-value") !== "" && !Number.isNaN(Number(val("pf-max-value")))) o.max_value = Number(val("pf-max-value"));
     } else if (kind === "proxmox") {
-      obj.url = ($("pf-url")?.value || "").trim();
-      const node = ($("pf-node")?.value || "").trim();
-      if (node) obj.node = node;
-      obj.insecure_skip_verify = Boolean($("pf-insecure")?.checked);
-      obj.token_id = ($("pf-token-id")?.value || "").trim();
-      obj.token_secret = ($("pf-token-secret")?.value || "").trim();
-      obj.max_cpu_percent = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
-      obj.vms = splitCSV($("pf-vms")?.value);
-      obj.disks = splitCSV($("pf-disks")?.value);
+      o.url = val("pf-url");
+      if (o.url && !/^https?:\/\//.test(o.url)) o.url = "https://" + o.url + (/:\d+$/.test(o.url) ? "" : ":8006");
+      if (val("pf-node")) o.node = val("pf-node");
+      o.insecure_skip_verify = $("pf-insecure").checked;
+      o.token_id = val("pf-token-id");
+      o.token_secret = val("pf-token-secret");
+      o.max_cpu_percent = num("pf-max-cpu");
+      o.max_ram_percent = num("pf-max-ram");
+      o.max_disk_percent = num("pf-max-disk");
+      o.vms = splitCSV(val("pf-vms"));
+      o.disks = splitCSV(val("pf-disks"));
     } else if (kind === "windows_winrm") {
-      obj.host = ($("pf-host")?.value || "").trim();
-      obj.port = Number($("pf-port")?.value) || ($("pf-use-https")?.checked ? 5986 : 5985);
-      obj.use_https = Boolean($("pf-use-https")?.checked);
-      obj.insecure_skip_verify = Boolean($("pf-insecure")?.checked);
-      obj.domain = ($("pf-domain")?.value || "").trim();
-      obj.user = ($("pf-user")?.value || "").trim();
-      obj.password = $("pf-password")?.value || "";
-      obj.max_cpu_percent = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
-      obj.vms = splitCSV($("pf-vms")?.value);
-      obj.services = splitCSV($("pf-services")?.value);
-      obj.disks = splitCSV($("pf-disks")?.value);
+      o.host = val("pf-host");
+      o.use_https = Boolean($("pf-use-https")?.checked);
+      o.port = num("pf-port") || (o.use_https ? 5986 : 5985);
+      o.insecure_skip_verify = $("pf-insecure").checked;
+      o.domain = val("pf-domain");
+      o.user = val("pf-user");
+      o.password = $("pf-password")?.value || "";
+      o.max_cpu_percent = num("pf-max-cpu");
+      o.max_ram_percent = num("pf-max-ram");
+      o.max_disk_percent = num("pf-max-disk");
+      o.vms = splitCSV(val("pf-vms"));
+      o.services = splitCSV(val("pf-services"));
+      o.disks = splitCSV(val("pf-disks"));
     } else if (kind === "linux_ssh") {
-      obj.host = ($("pf-host")?.value || "").trim();
-      obj.port = Number($("pf-port")?.value) || 22;
-      obj.user = ($("pf-user")?.value || "").trim();
-      obj.password = $("pf-password")?.value || "";
-      obj.ssh_key = $("pf-ssh-key")?.value || "";
-      obj.max_cpu_percent = Number($("pf-max-cpu")?.value) || 0;
-      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
-      obj.services = splitCSV($("pf-services")?.value);
-      obj.disks = splitCSV($("pf-disks")?.value);
+      o.host = val("pf-host");
+      o.port = num("pf-port") || 22;
+      o.user = val("pf-user");
+      o.password = $("pf-password")?.value || "";
+      o.ssh_key = $("pf-ssh-key")?.value || "";
+      o.max_cpu_percent = num("pf-max-cpu");
+      o.max_ram_percent = num("pf-max-ram");
+      o.max_disk_percent = num("pf-max-disk");
+      o.services = splitCSV(val("pf-services"));
+      o.disks = splitCSV(val("pf-disks"));
     } else if (kind === "node_exporter" || kind === "windows_exporter") {
-      obj.url = ($("pf-url")?.value || "").trim();
-      obj.max_ram_percent = Number($("pf-max-ram")?.value) || 0;
-      obj.max_disk_percent = Number($("pf-max-disk")?.value) || 0;
-      obj.disks = splitCSV($("pf-disks")?.value);
-      if (kind === "windows_exporter") obj.services = splitCSV($("pf-services")?.value);
+      o.url = val("pf-url");
+      o.max_ram_percent = num("pf-max-ram");
+      o.max_disk_percent = num("pf-max-disk");
+      o.disks = splitCSV(val("pf-disks"));
+      if (kind === "windows_exporter") o.services = splitCSV(val("pf-services"));
     }
-    return obj;
+
+    if (!o.id) {
+      const src = String(o.url || o.host || kindLabel(kind)).replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "");
+      const base = slugify(o.kind === "docker" ? "conteneurs-docker" : src) || kind;
+      let id = base;
+      let n = 2;
+      const taken = new Set((state.draft?.probes || []).filter((_, i) => i !== state.wizard.editIndex).map((p) => p.id));
+      while (taken.has(id)) id = base + "-" + n++;
+      o.id = id;
+    }
+    return o;
   }
 
-  async function runModalProbeTest() {
-    const probe = readProbeFormObject();
-    const banner = $("probe-test-banner");
-    if (!banner) return;
-    banner.hidden = false;
-    banner.className = "test-banner";
-    banner.textContent = "Test de connexion en cours…";
-    triggerLEDBusy("orbit", "Test sonde", probe.id || probe.kind, 2400);
+  function validateWizard() {
+    let firstBad = null;
+    $$("#wizard-fields [required]").forEach((el) => {
+      const bad = !String(el.value || "").trim();
+      el.classList.toggle("invalid", bad);
+      if (bad && !firstBad) firstBad = el;
+    });
+    const id = val("pf-id");
+    const taken = (state.draft?.probes || []).some((p, i) => i !== state.wizard.editIndex && p.id === id);
+    if (id && taken) {
+      $("pf-id").classList.add("invalid");
+      toast("Un appareil s'appelle déjà « " + id + " ».", "warn");
+      return $("pf-id");
+    }
+    if (firstBad) toast("Il manque une information.", "warn");
+    return firstBad;
+  }
 
+  async function wizardSubmit() {
+    const bad = validateWizard();
+    if (bad) { bad.focus(); return; }
+    const probe = readWizardProbe();
+    setWizardStep(3);
+    const box = $("wizard-test");
+    box.hidden = false;
+    box.className = "test-result pending";
+    box.innerHTML = '<span class="spinner" aria-hidden="true"></span><div class="grow"><b>Test de la connexion…</b><span>Cela peut prendre quelques secondes.</span></div>';
+    const btn = $("wizard-submit");
+    setBusy(btn, true);
     try {
-      const res = await apiFetch("/api/probes/test", {
-        method: "POST",
-        body: JSON.stringify({ probe })
-      });
-      banner.className = "test-banner " + (res.ok ? "is-ok" : "is-err");
-      let details = (res.ok ? "Succès : " : "Échec : ") + (res.summary || "—") + " (" + res.latency_ms + " ms)";
-      if (res.metrics) {
-        const m = res.metrics;
-        const extras = [];
-        if (typeof m.cpu_percent === "number") extras.push("CPU " + m.cpu_percent.toFixed(1) + "%");
-        if (typeof m.ram_percent === "number") extras.push("RAM " + m.ram_percent.toFixed(1) + "%");
-        if (typeof m.disk_max_pct === "number") extras.push("Disque " + m.disk_max_pct.toFixed(1) + "%");
-        if (m.guests?.length) extras.push(m.guests.length + " VM(s)");
-        if (m.disks?.length) extras.push(m.disks.length + " volume(s)");
-        if (extras.length) details += "\nTélémétrie : " + extras.join(" · ");
+      const res = await apiFetch("/api/probes/test", { method: "POST", body: JSON.stringify({ probe }) });
+      if (res.ok) {
+        box.className = "test-result ok";
+        box.innerHTML = '<span class="ms" aria-hidden="true">check_circle</span><div class="grow"><b>Ça marche.</b><span>' + esc(res.summary || "") + " · " + esc(res.latency_ms) + " ms" + metricsLine(res.metrics) + "</span></div>";
+        await saveWizardProbe(probe);
+      } else {
+        box.className = "test-result err";
+        box.innerHTML = '<span class="ms" aria-hidden="true">error</span><div class="grow"><b>La connexion a échoué.</b><span>' + esc(humanize(res.summary) || "Pas de réponse.") + '</span><span class="mono small">' + esc(res.summary || "") + "</span><span>Vérifiez l'adresse et les identifiants, puis réessayez.</span></div>";
+        $("wizard-submit-text").textContent = "Tester à nouveau";
+        $("wizard-save-anyway").hidden = false;
       }
-      banner.textContent = details;
-      banner.style.whiteSpace = "pre-line";
     } catch (e) {
-      banner.className = "test-banner is-err";
-      banner.textContent = "Erreur test : " + e.message;
+      box.className = "test-result err";
+      box.innerHTML = '<span class="ms" aria-hidden="true">error</span><div class="grow"><b>Test impossible.</b><span>' + esc(e.message) + "</span></div>";
+      $("wizard-submit-text").textContent = "Tester à nouveau";
+      $("wizard-save-anyway").hidden = false;
+    } finally {
+      setBusy(btn, false);
     }
   }
 
-  async function submitProbeModal(e) {
-    e.preventDefault();
-    const probe = readProbeFormObject();
-    if (!probe.id) {
-      showToast("Indiquez un nom de sonde.", "warn");
-      return;
-    }
+  function metricsLine(m) {
+    if (!m) return "";
+    const x = [];
+    if (typeof m.cpu_percent === "number") x.push("processeur " + fmtPct(m.cpu_percent));
+    if (typeof m.ram_percent === "number") x.push("mémoire " + fmtPct(m.ram_percent));
+    if (typeof m.disk_max_pct === "number") x.push("disque " + fmtPct(m.disk_max_pct));
+    if (m.guests?.length) x.push(plural(m.guests.length, "VM", "VM"));
+    if (m.containers?.length) x.push(plural(m.containers.length, "conteneur", "conteneurs"));
+    return x.length ? " · " + x.join(" · ") : "";
+  }
+
+  async function saveWizardProbe(probe) {
     state.draft = ensureDraftShape(state.draft || state.config);
-    if (state.editingIndex >= 0) {
-      state.draft.probes[state.editingIndex] = probe;
-    } else {
-      state.draft.probes.push(probe);
-    }
-    $("probe-modal").hidden = true;
-    selectProbe(probe.id, false);
+    const editing = state.wizard.editIndex >= 0;
+    if (editing) state.draft.probes[state.wizard.editIndex] = probe;
+    else state.draft.probes.push(probe);
     const saved = await saveConfiguration(false);
-    if (saved) showToast("Sonde « " + probe.id + " » enregistrée.");
+    if (saved) {
+      closeWizard();
+      toast(editing ? probe.id + " mis à jour." : probe.id + " est maintenant surveillé.");
+      openDevice(probe.id);
+    } else if (!editing) {
+      state.draft.probes.pop();
+    }
   }
 
-  /* -------------------- View 03: Friends & Invites + Peer Drawer -------------------- */
+  /* -------------------- Amis -------------------- */
 
   function encodeInvite(cfg) {
     const node = cfg?.node;
     if (!node || !node.private_key_hex || !node.group_psk_hex) return "";
     const pub = state.status?.pubkey_hex || node.pubkey_hex || "";
     if (!pub) return "";
-    const payload = {
-      name: node.name || "MeshWatch",
-      pubkey: pub,
-      psk: node.group_psk_hex
-    };
-    const json = JSON.stringify(payload);
+    const json = JSON.stringify({ name: node.name || "MeshWatch", pubkey: pub, psk: node.group_psk_hex });
     const bytes = new TextEncoder().encode(json);
     let bin = "";
     bytes.forEach((b) => { bin += String.fromCharCode(b); });
@@ -1899,17 +1613,14 @@
   }
 
   function decodeInvite(raw) {
-    const clean = String(raw || "").trim();
+    const clean = String(raw || "").trim().replace(/\s+/g, "");
     if (!clean) return null;
-    if (/^[0-9a-fA-F]{64}$/.test(clean)) {
-      return { name: "", pubkey_hex: clean.toLowerCase(), group_psk_hex: "" };
-    }
+    if (/^[0-9a-fA-F]{64}$/.test(clean)) return { name: "", pubkey_hex: clean.toLowerCase(), group_psk_hex: "" };
     if (!clean.startsWith("MW1-")) return null;
     try {
       let b64 = clean.slice(4).replace(/-/g, "+").replace(/_/g, "/");
       while (b64.length % 4) b64 += "=";
-      const bin = atob(b64);
-      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       const obj = JSON.parse(new TextDecoder().decode(bytes));
       const pub = obj.pubkey || obj.pubkey_hex || obj.pk || "";
       const psk = obj.psk || obj.group_psk_hex || "";
@@ -1924,102 +1635,131 @@
     }
   }
 
-  function renderFriendsView(st) {
-    const inviteEl = $("my-invite-code");
-    if (inviteEl && state.config) {
-      inviteEl.value = encodeInvite(state.config) || "Clés non encore initialisées";
-    }
-    const peers = st.peers || [];
-    if ($("friends-count")) $("friends-count").textContent = String(peers.length);
+  function renderFriends(st) {
+    const code = encodeInvite(state.config);
+    $("invite-code").textContent = code || "Le code apparaîtra une fois cette maison nommée.";
+    $("invite-copy").disabled = !code;
+    $("invite-share").hidden = !(code && navigator.share);
 
-    const listEl = $("friends-list");
-    if (!listEl) return;
+    const peers = st.peers || [];
+    $("friends-count").textContent = String(peers.length);
+    const box = $("friends-list");
     if (!peers.length) {
-      listEl.innerHTML = '<div class="empty-state">Aucun ami connecté. Partagez votre code d\'invitation ci-dessus ou acceptez le sien.</div>';
+      box.innerHTML = '<div class="empty">Aucun ami pour l\'instant. Envoyez votre code à quelqu\'un de confiance, ou collez le sien ci-dessus.</div>';
       return;
     }
-
-    listEl.innerHTML = peers.map((p) => {
-      let badgeCls = "";
-      let statusLabel = "EN ATTENTE";
-      if (p.timed_out) { badgeCls = "danger"; statusLabel = "HORS LIGNE"; }
-      else if (p.online && !p.overall_ok) { badgeCls = "warn"; statusLabel = "ALERTE CHEZ LUI"; }
-      else if (p.online) { badgeCls = "ok"; statusLabel = "EN LIGNE"; }
-
+    box.innerHTML = peers.map((p) => {
+      const ps = peerState(p);
+      const probes = p.probes || [];
+      const bad = probes.filter((x) => !x.ok);
+      let line;
+      if (ps.tone === "down") line = "Plus de signal depuis " + fmtAgo(p.last_seen).replace("il y a ", "");
+      else if (ps.tone === "warn") line = bad.map((x) => x.id + (x.summary ? " : " + humanize(x.summary) : "")).slice(0, 2).join(" · ");
+      else if (ps.tone === "off") line = "En attente de son premier signal";
+      else line = plural(probes.length, "appareil", "appareils") + (bad.length ? "" : ", tous en ligne") + " · signal reçu " + fmtAgo(p.last_seen);
       return (
-        '<div class="surface-row">' +
-          '<div class="row-main">' +
-            '<div class="row-title-line">' +
-              '<span class="row-title">' + esc(p.name) + "</span>" +
-              '<span class="badge ' + badgeCls + '">' + statusLabel + "</span>" +
-              '<span class="chip">' + esc((p.probes || []).length) + " sondes</span>" +
-            "</div>" +
-            '<div class="row-sub">' + esc((p.pubkey_hex || "").slice(0, 18)) + "… · Dernier signal : " + esc(fmtAge(p.last_seen)) + " · Uptime " + esc(fmtUptime(p.uptime_sec)) + "</div>" +
-          "</div>" +
-          '<div class="row-right">' +
-            MW().uptimeStripHTML(p.history || [], true, 14) +
-            '<button class="inline-action" type="button" data-peer-inspect="' + esc(p.pubkey_hex) + '">Inspecter</button>' +
-            '<button class="inline-danger" type="button" data-peer-remove="' + esc(p.pubkey_hex) + '">Retirer</button>' +
-          "</div>" +
+        '<div class="friend-row">' +
+          '<span class="avatar" aria-hidden="true">' + esc(initials(p.name)) + "</span>" +
+          '<span class="row-main"><span class="row-title"><b>' + esc(p.name) + "</b></span><span class=\"row-sub\"><span>" + esc(line) + "</span></span></span>" +
+          (MW().uptimeStripHTML ? '<span class="col-bars">' + MW().uptimeStripHTML(p.history || [], true, 20) + "</span>" : "") +
+          '<span class="pill ' + ps.tone + '"><span class="dot"></span>' + esc(ps.label) + "</span>" +
+          '<button class="btn sm" type="button" data-open-peer="' + esc(p.pubkey_hex) + '">Détails</button>' +
         "</div>"
       );
     }).join("");
-
-    listEl.querySelectorAll("[data-peer-inspect]").forEach((b) => {
-      b.addEventListener("click", () => openPeerDrawer(b.dataset.peerInspect));
-    });
-    listEl.querySelectorAll("[data-peer-remove]").forEach((b) => {
-      b.addEventListener("click", async () => {
-        if (!state.draft?.peers) return;
-        state.draft.peers = state.draft.peers.filter((pr) => pr.pubkey_hex !== b.dataset.peerRemove);
-        await saveConfiguration(false);
-        showToast("Pair retiré de votre liste.");
-      });
-    });
   }
 
-  function openPeerDrawer(pubkeyHex) {
-    const peer = (state.status?.peers || []).find((p) => p.pubkey_hex === pubkeyHex);
-    if (!peer) return;
-    $("peer-drawer-name").textContent = peer.name || "Ami MeshWatch";
-    $("peer-drawer-sub").textContent = (peer.node_name ? peer.node_name + " · " : "") + pubkeyHex.slice(0, 22) + "…";
-
-    let bodyHTML =
-      '<div class="res-item" style="margin-bottom:14px;">' +
-        '<div class="res-group-title">Historique de présence (derniers battements)</div>' +
-        MW().uptimeStripHTML(peer.history || [], true, 28) +
-      "</div>" +
-      '<div class="res-item" style="margin-bottom:14px;"><dl class="kv">' +
-        "<dt>Statut</dt><dd>" + (peer.timed_out ? "Hors ligne (timeout)" : peer.online ? (peer.overall_ok ? "Opérationnel" : "Alerte détectée") : "En attente du 1er signal") + "</dd>" +
-        "<dt>Dernier battement</dt><dd>" + esc(fmtAge(peer.last_seen)) + "</dd>" +
-        "<dt>Uptime nœud</dt><dd>" + esc(fmtUptime(peer.uptime_sec)) + "</dd>" +
-        '<dt>Clé Nostr</dt><dd class="mono">' + esc(pubkeyHex) + "</dd>" +
-      "</dl></div>";
-
-    const probes = peer.probes || [];
-    bodyHTML += '<div class="res-group-title">Sondes reçues de cet ami (' + probes.length + ")</div>";
-    if (!probes.length) {
-      bodyHTML += '<div class="empty-state">Aucune sonde transmise pour le moment.</div>';
-    } else {
-      bodyHTML += probes.map((pr) => (
-        '<div class="res-item" style="margin-bottom:8px;">' +
-          '<div class="res-item-row"><strong>' + esc(pr.id) + '</strong><span class="badge ' + (pr.ok ? "ok" : "danger") + '">' + (pr.ok ? "OK" : "PANNE") + "</span></div>" +
-          '<div class="mono" style="font-size:11px;color:var(--text-muted);">' + esc(pr.summary) + " (" + esc(pr.latency_ms) + " ms)</div>" +
-        "</div>"
-      )).join("");
+  function updateAcceptPreview() {
+    const raw = $("accept-input").value;
+    const dec = decodeInvite(raw);
+    const pv = $("accept-preview");
+    const btn = $("accept-btn");
+    if (!raw.trim()) { pv.hidden = true; btn.disabled = true; $("accept-btn-text").textContent = "Ajouter cet ami"; return; }
+    pv.hidden = false;
+    if (!dec) {
+      pv.className = "notice err";
+      pv.innerHTML = '<span class="ms" aria-hidden="true">error</span><span>Ce code n\'est pas reconnu. Il doit commencer par MW1-.</span>';
+      btn.disabled = true;
+      return;
     }
-
-    $("peer-drawer-body").innerHTML = bodyHTML;
-    $("peer-drawer-backdrop").hidden = false;
-    $("peer-drawer").hidden = false;
+    const mine = (state.status?.pubkey_hex || "").toLowerCase() === dec.pubkey_hex;
+    const already = (state.draft?.peers || []).find((p) => (p.pubkey_hex || "").toLowerCase() === dec.pubkey_hex);
+    if (mine) {
+      pv.className = "notice warn";
+      pv.innerHTML = '<span class="ms" aria-hidden="true">info</span><span>C\'est votre propre code. Envoyez-le à votre ami, et collez ici le sien.</span>';
+      btn.disabled = true;
+      return;
+    }
+    if (already) {
+      pv.className = "notice warn";
+      pv.innerHTML = '<span class="ms" aria-hidden="true">info</span><span>' + esc(already.name) + " fait déjà partie de vos amis.</span>";
+      btn.disabled = true;
+      return;
+    }
+    const name = dec.name || "cet ami";
+    pv.className = "notice ok";
+    pv.innerHTML = '<span class="ms" aria-hidden="true">check_circle</span><span><b>Code valide :</b> c\'est « ' + esc(name) + " ».</span>";
+    btn.disabled = false;
+    $("accept-btn-text").textContent = "Ajouter " + (dec.name || "cet ami");
   }
 
-  function closePeerDrawer() {
-    $("peer-drawer-backdrop").hidden = true;
-    $("peer-drawer").hidden = true;
+  async function acceptInvite() {
+    const dec = decodeInvite($("accept-input").value);
+    if (!dec) return;
+    state.draft = ensureDraftShape(state.draft || state.config);
+    if (!state.draft.peers.some((p) => (p.pubkey_hex || "").toLowerCase() === dec.pubkey_hex)) {
+      state.draft.peers.push({ name: dec.name || "Ami " + (state.draft.peers.length + 1), pubkey_hex: dec.pubkey_hex });
+    }
+    if (dec.group_psk_hex && (!state.draft.node.group_psk_hex || state.draft.peers.length <= 1)) {
+      state.draft.node.group_psk_hex = dec.group_psk_hex;
+    }
+    const btn = $("accept-btn");
+    setBusy(btn, true);
+    const saved = await saveConfiguration(false);
+    setBusy(btn, false);
+    if (saved) {
+      $("accept-input").value = "";
+      updateAcceptPreview();
+      toast((dec.name || "Votre ami") + " a été ajouté. Pensez à lui envoyer votre code en retour.");
+    }
   }
 
-  /* -------------------- Forms Sync (Alerts & Settings -> ConfigDTO) -------------------- */
+  function openPeer(pk) {
+    const p = (state.status?.peers || []).find((x) => x.pubkey_hex === pk);
+    if (!p) return;
+    state.peerOpen = pk;
+    state.lastFocus = document.activeElement;
+    const ps = peerState(p);
+    $("peer-title").textContent = p.name || "Ami";
+    $("peer-sub").textContent = ps.label + " · signal reçu " + fmtAgo(p.last_seen);
+    const probes = p.probes || [];
+    $("peer-body").innerHTML =
+      '<div class="stack"><span class="caps">Présence récente</span><div class="uptime-big">' + (MW().uptimeStripHTML ? MW().uptimeStripHTML(p.history || [], true, 40) : "") + "</div></div>" +
+      '<section class="card list-card res-section"><h3>Ses appareils · ' + probes.length + "</h3>" +
+        (probes.length
+          ? probes.map((x) => '<div class="res-row"><span class="sdot ' + (x.ok ? "ok" : "down") + '"></span><div class="grow"><b>' + esc(x.id) + "</b><small>" + esc(humanize(x.summary)) + '</small></div><span class="mono muted">' + esc(x.latency_ms || 0) + " ms</span></div>").join("")
+          : '<div class="empty">Rien de transmis pour l\'instant.</div>') +
+      "</section>" +
+      '<details class="fold"><summary>Détails techniques</summary><dl class="kv">' +
+        "<dt>Nom de sa maison</dt><dd>" + esc(p.node_name || "—") + "</dd>" +
+        "<dt>Allumé depuis</dt><dd>" + esc(fmtDuration(p.uptime_sec)) + "</dd>" +
+        '<dt>Clé publique</dt><dd class="mono">' + esc(p.pubkey_hex) + "</dd>" +
+      "</dl></details>";
+    $("peer-modal").hidden = false;
+    setTimeout(() => $("peer-modal").querySelector("[data-close]")?.focus(), 30);
+  }
+
+  async function removePeer() {
+    const pk = state.peerOpen;
+    const p = (state.status?.peers || []).find((x) => x.pubkey_hex === pk);
+    const ok = await confirmDialog("Retirer " + (p?.name || "cet ami") + " ?", "Vous ne veillerez plus l'un sur l'autre. Vous pourrez le rajouter plus tard avec son code.", "Retirer");
+    if (!ok) return;
+    state.draft.peers = (state.draft.peers || []).filter((x) => x.pubkey_hex !== pk);
+    closeModal("peer-modal");
+    if (await saveConfiguration(false)) toast((p?.name || "L'ami") + " a été retiré.");
+  }
+
+  /* -------------------- Formulaires (Alertes & Réglages) -------------------- */
 
   function inferPhotonMode(ph) {
     if (!ph) return "cloud";
@@ -2032,11 +1772,18 @@
     return "cloud";
   }
 
-  function syncPhotonFieldsVisibility() {
-    const mode = $("photon-mode")?.value || "cloud";
-    if ($("photon-mode-cloud")) $("photon-mode-cloud").hidden = mode !== "cloud";
-    if ($("photon-mode-proxy")) $("photon-mode-proxy").hidden = mode !== "proxy";
-    if ($("photon-mode-custom")) $("photon-mode-custom").hidden = mode !== "custom";
+  function photonMode() {
+    return document.querySelector('input[name="photon-mode"]:checked')?.value || "cloud";
+  }
+
+  function syncPhotonMode() {
+    const mode = photonMode();
+    $$("[data-photon]").forEach((el) => { el.hidden = el.dataset.photon !== mode; });
+  }
+
+  function setVal(id, v) {
+    const el = $(id);
+    if (el) el.value = v == null ? "" : v;
   }
 
   function renderConfigForms() {
@@ -2044,250 +1791,209 @@
     state.draft = cfg;
 
     const ntfy = cfg.notifications.ntfy || {};
-    if ($("ntfy-enabled")) $("ntfy-enabled").checked = Boolean(ntfy.enabled);
-    if ($("ntfy-url")) $("ntfy-url").value = ntfy.url || "";
-    if ($("ntfy-topic")) $("ntfy-topic").value = ntfy.topic || "";
-    if ($("ntfy-token")) $("ntfy-token").value = ntfy.token || "";
+    $("ntfy-enabled").checked = Boolean(ntfy.enabled);
+    setVal("ntfy-url", ntfy.url);
+    setVal("ntfy-topic", ntfy.topic);
+    setVal("ntfy-token", ntfy.token);
 
     const ph = cfg.notifications.photon_imessage || {};
-    if ($("photon-enabled")) $("photon-enabled").checked = Boolean(ph.enabled);
-    const pMode = inferPhotonMode(ph);
-    if ($("photon-mode")) $("photon-mode").value = pMode;
-    syncPhotonFieldsVisibility();
+    const mode = inferPhotonMode(ph);
+    $("photon-enabled").checked = Boolean(ph.enabled);
+    $$('input[name="photon-mode"]').forEach((r) => { r.checked = r.value === mode; });
+    syncPhotonMode();
+    setVal("photon-project-id", ph.project_id);
+    setVal("photon-api-key", ph.api_key || (mode === "cloud" ? ph.token : ""));
+    setVal("photon-recipient", ph.recipient);
+    setVal("photon-cloud-url", mode === "cloud" ? ph.url : "");
+    setVal("photon-sender-id", ph.sender_id);
+    setVal("photon-space-id", ph.space_id);
+    setVal("photon-server-url", ph.server_url);
+    setVal("photon-proxy-key", mode === "proxy" ? ph.api_key : "");
+    setVal("photon-proxy-recipient", ph.recipient);
+    setVal("photon-proxy-url", mode === "proxy" ? ph.url || "https://imessage-swagger.photon.codes" : "https://imessage-swagger.photon.codes");
+    setVal("photon-proxy-token", mode === "proxy" ? ph.token : "");
+    setVal("photon-custom-url", mode === "custom" ? ph.url : "");
+    setVal("photon-custom-recipient", ph.recipient);
+    setVal("photon-custom-token", mode === "custom" ? ph.token : "");
+    setVal("photon-rec-field", ph.recipient_field || "recipient");
+    setVal("photon-msg-field", ph.message_field || "message");
 
-    if ($("photon-project-id")) $("photon-project-id").value = ph.project_id || "";
-    if ($("photon-api-key")) $("photon-api-key").value = ph.api_key || (pMode === "cloud" ? ph.token || "" : "");
-    if ($("photon-recipient")) $("photon-recipient").value = ph.recipient || "";
-    if ($("photon-cloud-url")) $("photon-cloud-url").value = pMode === "cloud" ? (ph.url || "") : "";
-    if ($("photon-sender-id")) $("photon-sender-id").value = ph.sender_id || "";
-    if ($("photon-space-id")) $("photon-space-id").value = ph.space_id || "";
+    const sel = $("peer-timeout-select");
+    const pt = cfg.node.peer_timeout || "1m30s";
+    if (!Array.from(sel.options).some((o) => o.value === pt)) {
+      const o = document.createElement("option");
+      o.value = pt;
+      o.textContent = fmtGoDuration(pt);
+      sel.appendChild(o);
+    }
+    sel.value = pt;
+    $("automute-enabled").checked = (cfg.auto_mute.targets || []).length > 0;
 
-    if ($("photon-server-url")) $("photon-server-url").value = ph.server_url || "";
-    if ($("photon-proxy-key")) $("photon-proxy-key").value = pMode === "proxy" ? (ph.api_key || "") : "";
-    if ($("photon-proxy-recipient")) $("photon-proxy-recipient").value = ph.recipient || "";
-    if ($("photon-proxy-url")) $("photon-proxy-url").value = pMode === "proxy" ? (ph.url || "https://imessage-swagger.photon.codes") : "https://imessage-swagger.photon.codes";
-    if ($("photon-proxy-token")) $("photon-proxy-token").value = pMode === "proxy" ? (ph.token || "") : "";
-
-    if ($("photon-custom-url")) $("photon-custom-url").value = pMode === "custom" ? (ph.url || "") : "";
-    if ($("photon-custom-recipient")) $("photon-custom-recipient").value = ph.recipient || "";
-    if ($("photon-custom-token")) $("photon-custom-token").value = pMode === "custom" ? (ph.token || "") : "";
-    if ($("photon-rec-field")) $("photon-rec-field").value = ph.recipient_field || "recipient";
-    if ($("photon-msg-field")) $("photon-msg-field").value = ph.message_field || "message";
-
-    const node = cfg.node || {};
-    if ($("set-node-name")) $("set-node-name").value = node.name || "";
-    if ($("set-pubkey")) $("set-pubkey").value = state.status?.pubkey_hex || node.pubkey_hex || "";
-    if ($("set-privkey")) $("set-privkey").value = node.private_key_hex || "";
-    if ($("set-group-psk")) $("set-group-psk").value = node.group_psk_hex || "";
-    if ($("set-hb-interval")) $("set-hb-interval").value = node.heartbeat_interval || "30s";
-    if ($("set-peer-timeout")) $("set-peer-timeout").value = node.peer_timeout || "1m30s";
-
-    if ($("set-relays")) $("set-relays").value = (cfg.nostr?.relays || []).join("\n");
-    if ($("set-automute-targets")) $("set-automute-targets").value = (cfg.auto_mute?.targets || []).join("\n");
-    if ($("set-automute-timeout")) $("set-automute-timeout").value = cfg.auto_mute?.timeout || "3s";
-
-    if ($("raw-yaml-editor")) $("raw-yaml-editor").value = state.rawYAML || "";
-    if ($("settings-config-path")) $("settings-config-path").textContent = state.status?.config_path || "config.yaml";
+    setVal("set-node-name", cfg.node.name);
+    setVal("set-pubkey", state.status?.pubkey_hex || cfg.node.pubkey_hex);
+    setVal("set-privkey", cfg.node.private_key_hex);
+    setVal("set-group-psk", cfg.node.group_psk_hex);
+    setVal("set-hb-interval", cfg.node.heartbeat_interval || "30s");
+    setVal("set-relays", (cfg.nostr.relays || []).join("\n"));
+    setVal("set-automute-targets", (cfg.auto_mute.targets || []).join("\n"));
+    setVal("set-automute-timeout", cfg.auto_mute.timeout || "3s");
+    setVal("raw-yaml", state.rawYAML);
   }
 
-  function readPhotonDTO() {
-    const mode = $("photon-mode")?.value || "cloud";
-    const enabled = Boolean($("photon-enabled")?.checked);
+  function readPhoton() {
+    const mode = photonMode();
+    const enabled = $("photon-enabled").checked;
     if (mode === "cloud") {
-      return {
-        enabled,
-        mode: "cloud",
-        url: ($("photon-cloud-url")?.value || "").trim(),
-        project_id: ($("photon-project-id")?.value || "").trim(),
-        api_key: ($("photon-api-key")?.value || "").trim(),
-        recipient: ($("photon-recipient")?.value || "").trim(),
-        sender_id: ($("photon-sender-id")?.value || "").trim(),
-        space_id: ($("photon-space-id")?.value || "").trim()
-      };
+      return { enabled, mode: "cloud", url: val("photon-cloud-url"), project_id: val("photon-project-id"), api_key: val("photon-api-key"), recipient: val("photon-recipient"), sender_id: val("photon-sender-id"), space_id: val("photon-space-id") };
     }
     if (mode === "proxy") {
-      return {
-        enabled,
-        mode: "proxy",
-        url: ($("photon-proxy-url")?.value || "").trim() || "https://imessage-swagger.photon.codes",
-        server_url: ($("photon-server-url")?.value || "").trim(),
-        api_key: ($("photon-proxy-key")?.value || "").trim(),
-        token: ($("photon-proxy-token")?.value || "").trim(),
-        recipient: ($("photon-proxy-recipient")?.value || "").trim()
-      };
+      return { enabled, mode: "proxy", url: val("photon-proxy-url") || "https://imessage-swagger.photon.codes", server_url: val("photon-server-url"), api_key: val("photon-proxy-key"), token: val("photon-proxy-token"), recipient: val("photon-proxy-recipient") };
     }
-    return {
-      enabled,
-      mode: "custom",
-      url: ($("photon-custom-url")?.value || "").trim(),
-      recipient: ($("photon-custom-recipient")?.value || "").trim(),
-      token: ($("photon-custom-token")?.value || "").trim(),
-      recipient_field: ($("photon-rec-field")?.value || "").trim() || "recipient",
-      message_field: ($("photon-msg-field")?.value || "").trim() || "message"
-    };
+    return { enabled, mode: "custom", url: val("photon-custom-url"), recipient: val("photon-custom-recipient"), token: val("photon-custom-token"), recipient_field: val("photon-rec-field") || "recipient", message_field: val("photon-msg-field") || "message" };
   }
 
-  function pullConfigFormsIntoDraft() {
+  function pullFormsIntoDraft() {
     state.draft = ensureDraftShape(state.draft);
     const d = state.draft;
-
-    if ($("set-node-name")) d.node.name = $("set-node-name").value.trim() || "mon-homelab";
-    if ($("set-privkey")) {
-      const pk = $("set-privkey").value.trim();
-      if (pk) d.node.private_key_hex = pk;
-    }
-    if ($("set-group-psk")) {
-      const psk = $("set-group-psk").value.trim();
-      if (psk) d.node.group_psk_hex = psk;
-    }
-    if ($("set-hb-interval")) d.node.heartbeat_interval = $("set-hb-interval").value.trim() || "30s";
-    if ($("set-peer-timeout")) d.node.peer_timeout = $("set-peer-timeout").value.trim() || "1m30s";
-
-    if ($("set-relays")) d.nostr.relays = splitLines($("set-relays").value);
-    if ($("set-automute-targets")) d.auto_mute.targets = splitLines($("set-automute-targets").value);
-    if ($("set-automute-timeout")) d.auto_mute.timeout = $("set-automute-timeout").value.trim() || "3s";
-
+    d.node.name = val("set-node-name") || d.node.name || "maison";
+    if (val("set-privkey")) d.node.private_key_hex = val("set-privkey");
+    if (val("set-group-psk")) d.node.group_psk_hex = val("set-group-psk");
+    d.node.heartbeat_interval = val("set-hb-interval") || "30s";
+    d.node.peer_timeout = $("peer-timeout-select").value || "1m30s";
+    d.nostr.relays = splitLines($("set-relays").value);
+    let targets = splitLines($("set-automute-targets").value);
+    if (!$("automute-enabled").checked) targets = [];
+    else if (!targets.length) targets = ["1.1.1.1:443", "9.9.9.9:443"];
+    d.auto_mute.targets = targets;
+    d.auto_mute.timeout = val("set-automute-timeout") || "3s";
     d.notifications = {
-      ntfy: {
-        enabled: Boolean($("ntfy-enabled")?.checked),
-        url: ($("ntfy-url")?.value || "").trim(),
-        topic: ($("ntfy-topic")?.value || "").trim(),
-        token: ($("ntfy-token")?.value || "").trim()
-      },
-      photon_imessage: readPhotonDTO()
+      ntfy: { enabled: $("ntfy-enabled").checked, url: val("ntfy-url"), topic: val("ntfy-topic"), token: val("ntfy-token") },
+      photon_imessage: readPhoton()
     };
   }
 
   async function runTestNotify() {
-    pullConfigFormsIntoDraft();
-    const banner = $("alerts-test-banner");
-    if (banner) {
-      banner.hidden = false;
-      banner.innerHTML = "Envoi des notifications de test en cours…";
+    pullFormsIntoDraft();
+    const box = $("alerts-test-results");
+    const btn = $("alerts-test-btn");
+    const n = state.draft.notifications;
+    if (!n.ntfy.enabled && !n.photon_imessage.enabled) {
+      box.hidden = false;
+      box.innerHTML = '<div class="notice warn"><span class="ms" aria-hidden="true">info</span><span>Activez d\'abord ntfy ou iMessage ci-dessous.</span></div>';
+      return;
     }
-    triggerLEDBusy("wave", "Envoi alerte test", "NTFY / PHOTON", 2400);
+    box.hidden = false;
+    box.innerHTML = '<div class="test-line"><span class="spinner" aria-hidden="true"></span>Envoi en cours…</div>';
+    setBusy(btn, true);
     try {
-      const res = await apiFetch("/api/test-notify", {
-        method: "POST",
-        body: JSON.stringify({
-          node_name: state.draft.node?.name || "MeshWatch",
-          notifications: state.draft.notifications
-        })
-      });
+      const res = await apiFetch("/api/test-notify", { method: "POST", body: JSON.stringify({ node_name: state.draft.node?.name || "MeshWatch", notifications: n }) });
       const lines = res.results || [];
-      if (banner) {
-        banner.innerHTML = lines.map((l) => {
-          const detail = l.error || (l.ok ? "Envoyé (" + (l.latency_ms || 0) + " ms)" : "Échec");
-          return (
-            '<div class="test-output-line">' +
-              "<span><strong>" + esc(l.channel) + "</strong> — " + esc(detail) + "</span>" +
-              '<span class="badge ' + (l.ok ? "ok" : "danger") + '">' + (l.ok ? "ENVOYÉ" : "ÉCHEC") + "</span>" +
-            "</div>"
-          );
-        }).join("") || "Aucun canal actif configuré.";
-      }
+      box.innerHTML = lines.map((l) => (
+        '<div class="test-line"><span class="pill ' + (l.ok ? "ok" : "down") + '">' + (l.ok ? "Envoyé" : "Échec") + "</span><b>" + esc(l.channel) + '</b><span class="muted">' + esc(l.error || (l.ok ? "Regardez votre téléphone (" + (l.latency_ms || 0) + " ms)." : "")) + "</span></div>"
+      )).join("") || '<div class="test-line">Aucun canal actif.</div>';
     } catch (e) {
-      if (banner) banner.innerHTML = '<span style="color:var(--danger)">Erreur : ' + esc(e.message) + "</span>";
+      box.innerHTML = '<div class="notice err"><span class="ms" aria-hidden="true">error</span><span>' + esc(e.message) + "</span></div>";
+    } finally {
+      setBusy(btn, false);
     }
   }
 
-  /* -------------------- Updates & Setup & Backup -------------------- */
+  /* -------------------- Réglages, mises à jour, sauvegarde -------------------- */
 
-  async function checkUpdates(force = false) {
+  function renderSettingsLive(st) {
+    const relays = st.relays || [];
+    $("set-node-meta").textContent = "Allumé depuis " + fmtDuration(st.uptime_sec || 0) + " · " + relays.filter((r) => r.connected).length + " relais sur " + relays.length + " joignables";
+    $("set-config-path").textContent = st.config_path || "config.yaml";
+    if (!$("set-pubkey").value && st.pubkey_hex) $("set-pubkey").value = st.pubkey_hex;
+  }
+
+  async function checkUpdates(force) {
     try {
-      const info = await apiFetch("/api/update/check" + (force ? "?force=1" : ""), { method: "GET" });
-      state.updateInfo = info;
-      renderUpdateState(info);
-    } catch {
-      /* optional offline */
+      state.updateInfo = await apiFetch("/api/update/check" + (force ? "?force=1" : ""), { method: "GET" });
+      renderUpdate(state.updateInfo);
+      if (force) toast(state.updateInfo.update_available ? "Une nouvelle version est disponible." : "MeshWatch est à jour.");
+    } catch (e) {
+      if (force) toast("Vérification impossible : " + e.message, "err");
     }
   }
 
-  function renderUpdateState(info) {
+  function renderUpdate(info) {
     if (!info) return;
     const avail = Boolean(info.update_available);
-    if ($("nav-update-dot")) $("nav-update-dot").hidden = !avail;
-    if ($("home-update-banner")) $("home-update-banner").hidden = !avail;
-    if (avail && $("home-update-version")) {
-      $("home-update-version").textContent = info.latest_version || info.latest_commit || "Nouvelle image";
-    }
-    if ($("home-update-desc")) {
-      $("home-update-desc").textContent = "Version actuelle : " + (info.current_version || "dev") + " → Disponible : " + (info.latest_version || "latest");
-    }
-    if ($("home-update-link") && info.release_url) {
-      $("home-update-link").href = info.release_url;
-    }
-
-    if ($("settings-version-badge")) {
-      $("settings-version-badge").textContent = info.current_version || "dev";
-      $("settings-version-badge").className = "badge " + (avail ? "warn" : "ok") + " right";
-    }
-    if ($("settings-update-title")) {
-      $("settings-update-title").textContent = avail
-        ? "Mise à jour disponible : " + (info.latest_version || info.latest_commit)
-        : "Votre instance MeshWatch est à jour";
-    }
-    if ($("settings-update-meta")) {
-      $("settings-update-meta").textContent = "Actuelle : " + (info.current_version || "—") + (info.current_commit ? " (" + info.current_commit.slice(0, 7) + ")" : "");
-    }
-    if ($("settings-apply-update-btn")) {
-      $("settings-apply-update-btn").hidden = !avail;
-    }
+    const latest = info.latest_version || (info.latest_commit || "").slice(0, 7) || "nouvelle version";
+    $("nav-update-dot").hidden = !avail;
+    $("update-strip").hidden = !avail;
+    $("update-strip-version").textContent = latest;
+    const notes = $("update-strip-notes");
+    notes.hidden = !info.release_url;
+    if (info.release_url) notes.href = info.release_url;
+    $("set-update-title-text").textContent = avail ? "Version " + latest + " disponible" : "MeshWatch est à jour";
+    $("set-update-meta").textContent = "Version installée : " + (info.current_version || "dev") + (info.current_commit ? " (" + info.current_commit.slice(0, 7) + ")" : "");
+    $("set-update-apply").hidden = !avail;
   }
 
   async function triggerUpdate() {
-    const overlay = $("updating-overlay");
-    if (overlay) overlay.hidden = false;
+    const ok = await confirmDialog("Mettre à jour MeshWatch ?", "Le conteneur va redémarrer avec la nouvelle version. La surveillance s'interrompt une minute environ. En cas d'échec, l'ancienne version est remise en place.", "Mettre à jour");
+    if (!ok) return;
+    $("updating").hidden = false;
     try {
-      await apiFetch("/api/update/apply", {
-        method: "POST",
-        body: JSON.stringify({ image: state.updateInfo?.image || state.updateInfo?.docker_image || "" })
-      });
-      if ($("updating-progress")) $("updating-progress").style.width = "65%";
-      if ($("updating-phase-sub")) $("updating-phase-sub").textContent = "Redémarrage du conteneur…";
-
+      await apiFetch("/api/update/apply", { method: "POST", body: JSON.stringify({ image: state.updateInfo?.image || state.updateInfo?.docker_image || "" }) });
+      $("updating-bar").style.width = "65%";
+      $("updating-sub").textContent = "Redémarrage du conteneur…";
       let tries = 0;
+      const before = state.status?.version;
       clearInterval(state.updatePollTimer);
       state.updatePollTimer = setInterval(async () => {
         tries++;
         try {
           const st = await apiFetch("/api/status", { method: "GET" });
-          if (st && st.version && st.version !== state.status?.version) {
+          if ((st && st.version && st.version !== before) || tries > 20) {
             clearInterval(state.updatePollTimer);
-            window.location.reload();
-          } else if (tries > 20) {
-            clearInterval(state.updatePollTimer);
-            window.location.reload();
+            location.reload();
           }
         } catch {
-          if (tries > 25) {
-            clearInterval(state.updatePollTimer);
-            window.location.reload();
-          }
+          if (tries > 25) { clearInterval(state.updatePollTimer); location.reload(); }
         }
       }, 2000);
     } catch (e) {
-      if (overlay) overlay.hidden = true;
-      showToast("Mise à jour impossible : " + e.message, "err");
+      $("updating").hidden = true;
+      toast("Mise à jour impossible : " + e.message, "err");
     }
   }
 
-  async function runQuickSetup() {
-    const name = ($("setup-node-name")?.value || "").trim() || "MeshWatch";
-    triggerLEDBusy("wave", "Génération des clés", "AES-256-GCM", 2500);
+  async function runWelcome(e) {
+    e.preventDefault();
+    const name = val("welcome-name");
+    const err = $("welcome-error");
+    if (!name) { $("welcome-name").focus(); return; }
+    const btn = $("welcome-submit");
+    setBusy(btn, true);
+    err.hidden = true;
     try {
       const keys = await apiFetch("/api/keygen", { method: "POST", body: "{}" });
       state.draft = ensureDraftShape(state.draft || state.config);
       state.draft.node.name = name;
       state.draft.node.private_key_hex = keys.private_key_hex;
       state.draft.node.group_psk_hex = keys.group_psk_hex;
-      if ($("set-node-name")) $("set-node-name").value = name;
-      if ($("set-privkey")) $("set-privkey").value = keys.private_key_hex;
-      if ($("set-group-psk")) $("set-group-psk").value = keys.group_psk_hex;
+      setVal("set-node-name", name);
+      setVal("set-privkey", keys.private_key_hex);
+      setVal("set-group-psk", keys.group_psk_hex);
+      if (!state.draft.notifications.ntfy.topic) {
+        state.draft.notifications.ntfy.topic = randomTopic();
+        setVal("ntfy-topic", state.draft.notifications.ntfy.topic);
+      }
       const saved = await saveConfiguration(false);
-      if (saved) showToast("Nœud « " + name + " » initialisé !");
-    } catch (e) {
-      showToast("Erreur initialisation : " + e.message, "err");
+      if (saved) {
+        $("welcome").hidden = true;
+        toast("« " + name + " » est prête. Choisissons maintenant quoi surveiller.");
+        switchTab("home");
+        openWizard();
+      }
+    } catch (ex) {
+      err.textContent = "Impossible de créer les clés : " + ex.message;
+      err.hidden = false;
+    } finally {
+      setBusy(btn, false);
     }
   }
 
@@ -2296,390 +2002,376 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "meshwatch-config.yaml";
+    a.download = "meshwatch-" + (state.draft?.node?.name || "config") + ".yaml";
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
   }
 
-  async function importBackupFile(file) {
-    if (!file) return;
-    const text = await file.text();
+  async function applyYAML(text, okMsg) {
     try {
-      const res = await apiFetch("/api/config", {
-        method: "PUT",
-        body: JSON.stringify({ yaml: text })
-      });
+      const res = await apiFetch("/api/config", { method: "PUT", body: JSON.stringify({ yaml: text }) });
       state.config = ensureDraftShape(res.config);
       state.draft = clone(state.config);
       state.rawYAML = res.yaml || text;
-      state.dirty = false;
-      syncUnsavedBar();
+      setDirty(false);
       renderConfigForms();
       await fetchStatus();
-      showToast("Configuration YAML importée !");
+      toast(okMsg);
     } catch (e) {
-      showToast("YAML invalide : " + e.message, "err");
+      toast("Fichier refusé : " + e.message, "err");
     }
   }
 
-  /* -------------------- Command Palette & Keyboard Shortcuts -------------------- */
+  async function importBackup(file) {
+    if (!file) return;
+    const ok = await confirmDialog("Restaurer ce fichier ?", "Toute la configuration actuelle (appareils, amis, alertes, clés) sera remplacée par celle de « " + file.name + " ».", "Restaurer");
+    $("backup-import").value = "";
+    if (!ok) return;
+    await applyYAML(await file.text(), "Configuration restaurée.");
+  }
+
+  /* -------------------- Modales -------------------- */
+
+  function closeModal(id) {
+    const el = $(id);
+    if (!el || el.hidden) return;
+    if (id === "wizard") return closeWizard();
+    el.hidden = true;
+    if (id === "palette") return;
+    if (id === "confirm-modal" && state.confirmResolve) {
+      state.confirmResolve(false);
+      state.confirmResolve = null;
+    }
+    state.lastFocus?.focus?.();
+  }
+
+  function confirmDialog(title, text, okLabel) {
+    return new Promise((resolve) => {
+      state.confirmResolve = resolve;
+      $("confirm-title").textContent = title;
+      $("confirm-text").textContent = text;
+      $("confirm-ok").textContent = okLabel || "Confirmer";
+      $("confirm-modal").hidden = false;
+      setTimeout(() => $("confirm-cancel").focus(), 30);
+    });
+  }
+
+  function topOverlay() {
+    return ["confirm-modal", "palette", "shortcuts", "friend-modal", "peer-modal", "wizard", "auth-gate"].find((id) => $(id) && !$(id).hidden);
+  }
+
+  /* -------------------- Palette Ctrl K -------------------- */
 
   function openPalette() {
-    const pal = $("cmd-palette");
-    if (!pal) return;
-    state.paletteOpen = true;
-    pal.hidden = false;
-    const inp = $("palette-input");
-    if (inp) {
-      inp.value = "";
-      renderPaletteList("");
-      setTimeout(() => inp.focus(), 20);
-    }
+    state.lastFocus = document.activeElement;
+    $("palette").hidden = false;
+    $("palette-input").value = "";
+    renderPalette("");
+    setTimeout(() => $("palette-input").focus(), 20);
   }
 
-  function closePalette() {
-    const pal = $("cmd-palette");
-    if (pal) pal.hidden = true;
-    state.paletteOpen = false;
-  }
-
-  function buildPaletteItems() {
+  function paletteItems() {
     const items = [
-      { label: "01 · Supervision", sub: "Vue d'ensemble & inspecteur", tag: "VUE", run: () => switchTab("home") },
-      { label: "02 · Découverte", sub: "Docker, LAN & sondes configurées", tag: "VUE", run: () => switchTab("discover") },
-      { label: "03 · Mes amis", sub: "Invitations MW1 & veille mutuelle", tag: "VUE", run: () => switchTab("friends") },
-      { label: "04 · Alertes", sub: "ntfy & Photon iMessage", tag: "VUE", run: () => switchTab("alerts") },
-      { label: "05 · Système", sub: "Identité, relais & mises à jour", tag: "VUE", run: () => switchTab("settings") },
-      { label: "Tester toutes les sondes", sub: "Exécuter immédiatement tous les contrôles", tag: "ACTION", run: runAllProbesNow },
-      { label: "Ajouter une sonde", sub: "Ouvrir l'assistant de configuration", tag: "ACTION", run: () => openProbeModal(-1) },
-      { label: "Scanner le réseau local (LAN)", sub: "Aller dans Découverte LAN et analyser", tag: "ACTION", run: () => { switchTab("discover", "lan"); runLANScan(); } },
-      { label: "Basculer le thème clair / sombre", sub: "Signal Noir ↔ Papier Chaud", tag: "THÈME", run: () => applyTheme(state.theme === "dark" ? "light" : "dark") }
+      { group: "Aller à", icon: "home", label: "Accueil", run: () => switchTab("home") },
+      { group: "Aller à", icon: "dns", label: "Appareils", run: () => switchTab("devices") },
+      { group: "Aller à", icon: "group", label: "Amis", run: () => switchTab("friends") },
+      { group: "Aller à", icon: "notifications", label: "Alertes", run: () => switchTab("alerts") },
+      { group: "Aller à", icon: "settings", label: "Réglages", run: () => switchTab("settings") },
+      { group: "Actions", icon: "add", label: "Ajouter un appareil", run: () => openWizard() },
+      { group: "Actions", icon: "refresh", label: "Tout vérifier maintenant", run: () => runAllNow() },
+      { group: "Actions", icon: "wifi_find", label: "Chercher sur le réseau", run: () => { openWizard(); runLANScan(); } },
+      { group: "Actions", icon: "send", label: "M'envoyer une alerte de test", run: () => { switchTab("alerts"); runTestNotify(); } },
+      { group: "Actions", icon: "content_copy", label: "Copier mon code d'invitation", run: () => { const c = encodeInvite(state.config); if (c) copyText(c, "Code copié."); } },
+      { group: "Actions", icon: state.theme === "dark" ? "light_mode" : "dark_mode", label: state.theme === "dark" ? "Thème clair" : "Thème sombre", run: () => applyTheme(state.theme === "dark" ? "light" : "dark") }
     ];
-    (state.status?.probes || []).forEach((p) => {
-      items.push({
-        label: p.id,
-        sub: (PROBE_KINDS[p.kind]?.label || p.kind) + " · " + (p.ok ? "OK" : "PANNE") + " · " + p.latency_ms + " ms",
-        tag: "SONDE",
-        run: () => { selectProbe(p.id); switchTab("home"); }
-      });
-    });
-    (state.status?.peers || []).forEach((pr) => {
-      items.push({
-        label: pr.name,
-        sub: pr.online ? "Pair en ligne" : "Pair hors ligne",
-        tag: "AMI",
-        run: () => openPeerDrawer(pr.pubkey_hex)
-      });
-    });
+    deviceList().forEach((d) => items.push({ group: "Appareils", icon: kindIcon(d.kind), label: d.id, sub: d.ok === false ? "Ne répond plus" : kindLabel(d.kind), run: () => openDevice(d.id) }));
+    (state.status?.peers || []).forEach((p) => items.push({ group: "Amis", icon: "person", label: p.name, sub: peerState(p).label, run: () => { switchTab("friends"); openPeer(p.pubkey_hex); } }));
     return items;
   }
 
-  function renderPaletteList(query) {
-    const q = (query || "").toLowerCase().trim();
-    const all = buildPaletteItems();
-    const filtered = q ? all.filter((it) => (it.label + " " + it.sub + " " + it.tag).toLowerCase().includes(q)) : all;
-    state.paletteItems = filtered.slice(0, 14);
+  function renderPalette(q) {
+    const query = String(q || "").toLowerCase().trim();
+    const all = paletteItems();
+    state.paletteItems = (query ? all.filter((it) => (it.label + " " + (it.sub || "") + " " + it.group).toLowerCase().includes(query)) : all).slice(0, 16);
     state.paletteIndex = 0;
-
-    const listEl = $("palette-list");
-    if (!listEl) return;
+    const list = $("palette-list");
     if (!state.paletteItems.length) {
-      listEl.innerHTML = '<div class="empty-state">Aucun résultat.</div>';
+      list.innerHTML = '<div class="empty">Aucun résultat.</div>';
       return;
     }
-    listEl.innerHTML = state.paletteItems.map((it, idx) => (
-      '<button type="button" class="palette-item' + (idx === 0 ? " active" : "") + '" data-pal-idx="' + idx + '">' +
-        '<span class="chip">' + esc(it.tag) + "</span>" +
-        '<span style="font-weight:600;color:var(--text);">' + esc(it.label) + "</span>" +
-        '<span style="margin-left:auto;font-family:var(--font-mono);font-size:11px;color:var(--text-faint);">' + esc(it.sub) + "</span>" +
-      "</button>"
-    )).join("");
+    let html = "";
+    let group = "";
+    state.paletteItems.forEach((it, i) => {
+      if (it.group !== group) { group = it.group; html += '<div class="palette-group">' + esc(group) + "</div>"; }
+      html += '<button type="button" role="option" class="palette-item' + (i === 0 ? " active" : "") + '" data-pal="' + i + '" aria-selected="' + (i === 0) + '"><span class="ms" aria-hidden="true">' + it.icon + '</span><span class="grow"><b>' + esc(it.label) + "</b>" + (it.sub ? "<small>" + esc(it.sub) + "</small>" : "") + "</span></button>";
+    });
+    list.innerHTML = html;
+  }
 
-    listEl.querySelectorAll("[data-pal-idx]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const idx = Number(btn.dataset.palIdx);
-        const item = state.paletteItems[idx];
-        closePalette();
-        if (item) item.run();
-      });
+  function movePalette(delta) {
+    const n = state.paletteItems.length;
+    if (!n) return;
+    state.paletteIndex = (state.paletteIndex + delta + n) % n;
+    $$("#palette-list .palette-item").forEach((el, i) => {
+      el.classList.toggle("active", i === state.paletteIndex);
+      el.setAttribute("aria-selected", String(i === state.paletteIndex));
+      if (i === state.paletteIndex) el.scrollIntoView({ block: "nearest" });
     });
   }
 
-  function highlightPaletteItem(idx) {
-    const rows = document.querySelectorAll("#palette-list .palette-item");
-    rows.forEach((r, i) => r.classList.toggle("active", i === idx));
-    rows[idx]?.scrollIntoView({ block: "nearest" });
+  function runPalette(i) {
+    const it = state.paletteItems[i];
+    $("palette").hidden = true;
+    if (it) it.run();
   }
 
-  /* -------------------- Events -------------------- */
+  /* -------------------- Événements -------------------- */
 
-  function bindStaticEvents() {
-    document.querySelectorAll(".space-link[data-tab]").forEach((btn) => {
-      btn.addEventListener("click", () => switchTab(btn.dataset.tab));
-    });
-    document.querySelectorAll("[data-goto-tab]").forEach((btn) => {
-      btn.addEventListener("click", () => switchTab(btn.dataset.gotoTab));
-    });
-    document.querySelectorAll("#space-tabs button[data-subtab]").forEach((btn) => {
-      btn.addEventListener("click", () => switchDiscoverSubtab(btn.dataset.subtab));
-    });
-
-    $("sidebar-toggle")?.addEventListener("click", () => $("sidebar")?.classList.toggle("open"));
-    $("theme-dark-btn")?.addEventListener("click", () => applyTheme("dark"));
-    $("theme-light-btn")?.addEventListener("click", () => applyTheme("light"));
-
-    $("auth-submit-btn")?.addEventListener("click", submitAuthToken);
-    $("auth-token-input")?.addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuthToken(); });
-
-    $("top-run-btn")?.addEventListener("click", runAllProbesNow);
-    $("home-run-btn")?.addEventListener("click", runAllProbesNow);
-    $("managed-run-btn")?.addEventListener("click", runAllProbesNow);
-
-    $("top-add-btn")?.addEventListener("click", () => openProbeModal(-1));
-    $("home-add-probe-btn")?.addEventListener("click", () => openProbeModal(-1));
-    $("fleet-empty-add")?.addEventListener("click", () => openProbeModal(-1));
-    $("discover-new-btn")?.addEventListener("click", () => openProbeModal(-1));
-    $("managed-add-btn")?.addEventListener("click", () => openProbeModal(-1));
-
-    $("setup-create-btn")?.addEventListener("click", runQuickSetup);
-    $("home-update-apply")?.addEventListener("click", triggerUpdate);
-    $("settings-check-update-btn")?.addEventListener("click", () => checkUpdates(true));
-    $("settings-apply-update-btn")?.addEventListener("click", triggerUpdate);
-
-    $("fleet-seg")?.querySelectorAll("button[data-filter]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.fleetFilter = btn.dataset.filter;
-        $("fleet-seg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
-        if (state.status) renderFleetTable(state.status);
-      });
-    });
-    $("fleet-filter-input")?.addEventListener("input", (e) => {
-      state.fleetSearch = e.target.value;
-      if (state.status) renderFleetTable(state.status);
-    });
-    $("fleet-sort")?.addEventListener("change", (e) => {
-      state.fleetSort = e.target.value;
-      if (state.status) renderFleetTable(state.status);
-    });
-
-    document.querySelectorAll(".tab[data-insp-tab]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.inspectorTab = btn.dataset.inspTab;
-        localStorage.setItem(STORAGE.inspTab, state.inspectorTab);
-        if (state.status) renderInspector(state.status);
-      });
-    });
-    $("insp-test-btn")?.addEventListener("click", () => state.selectedProbeID && quickTestProbeByID(state.selectedProbeID));
-    $("insp-edit-btn")?.addEventListener("click", () => state.selectedProbeID && editProbeByID(state.selectedProbeID));
-    $("insp-del-btn")?.addEventListener("click", () => state.selectedProbeID && deleteProbeByID(state.selectedProbeID));
-
-    $("docker-scan-btn")?.addEventListener("click", () => runDockerScan(false));
-    $("docker-apply-btn")?.addEventListener("click", applyDockerSelection);
-    $("lan-scan-btn")?.addEventListener("click", runLANScan);
-    $("lan-category-filter")?.addEventListener("change", renderLANItems);
-    $("managed-filter-input")?.addEventListener("input", renderManagedProbes);
-
-    $("probe-modal-close")?.addEventListener("click", () => { $("probe-modal").hidden = true; });
-    $("probe-back-kind-btn")?.addEventListener("click", () => {
-      $("probe-step-kind").hidden = false;
-      $("probe-form").hidden = true;
-    });
-    document.querySelectorAll("[data-pick-kind]").forEach((card) => {
-      card.addEventListener("click", () => showProbeForm(card.dataset.pickKind, {}));
-    });
-    $("probe-test-modal-btn")?.addEventListener("click", runModalProbeTest);
-    $("probe-form")?.addEventListener("submit", submitProbeModal);
-
-    $("copy-invite-btn")?.addEventListener("click", async () => {
-      const val = $("my-invite-code")?.value || "";
-      if (!val.startsWith("MW1-")) { showToast("Initialisez le nœud d'abord.", "warn"); return; }
-      try { await navigator.clipboard.writeText(val); showToast("Code MW1 copié !"); }
-      catch { showToast("Sélectionnez et copiez le code manuellement.", "warn"); }
-    });
-    $("refresh-invite-btn")?.addEventListener("click", renderConfigForms);
-    $("accept-invite-input")?.addEventListener("input", (e) => {
-      const dec = decodeInvite(e.target.value);
-      const pv = $("accept-invite-preview");
-      if (!pv) return;
-      if (!dec) { pv.hidden = true; return; }
-      pv.hidden = false;
-      pv.textContent = "Ami détecté : " + dec.name + " · Clé " + dec.pubkey_hex.slice(0, 14) + "…";
-    });
-    $("accept-invite-btn")?.addEventListener("click", async () => {
-      const dec = decodeInvite($("accept-invite-input")?.value);
-      if (!dec) { showToast("Code MW1 ou clé hex invalide.", "err"); return; }
-      state.draft = ensureDraftShape(state.draft || state.config);
-      if (!state.draft.peers.some((p) => (p.pubkey_hex || "").toLowerCase() === dec.pubkey_hex)) {
-        state.draft.peers.push({ name: dec.name || "Ami " + (state.draft.peers.length + 1), pubkey_hex: dec.pubkey_hex });
+  function bindEvents() {
+    /* Délégation : navigation, ouverture d'appareils et d'amis, ajout */
+    document.addEventListener("click", (e) => {
+      const t = e.target.closest("[data-tab],[data-goto],[data-action],[data-open-device],[data-open-peer],[data-select-device],[data-edit-device],[data-close],[data-reveal],[data-pick-kind],[data-watch-container],[data-lan-add],[data-pal]");
+      if (!t) {
+        if (!e.target.closest(".menu-wrap")) { $("dd-menu").hidden = true; $("dd-more").setAttribute("aria-expanded", "false"); }
+        return;
       }
-      if (dec.group_psk_hex && (!state.draft.node.group_psk_hex || state.draft.peers.length <= 1)) {
-        state.draft.node.group_psk_hex = dec.group_psk_hex;
-        if ($("set-group-psk")) $("set-group-psk").value = dec.group_psk_hex;
+      if (t.dataset.tab) return switchTab(t.dataset.tab);
+      if (t.dataset.goto) { closeModal("palette"); return switchTab(t.dataset.goto); }
+      if (t.dataset.action === "add") return openWizard();
+      if (t.dataset.openDevice) return openDevice(t.dataset.openDevice);
+      if (t.dataset.openPeer) return openPeer(t.dataset.openPeer);
+      if (t.dataset.selectDevice) {
+        state.selectedID = t.dataset.selectDevice;
+        try { localStorage.setItem(STORAGE.device, state.selectedID); } catch {}
+        history.replaceState(null, "", "#/devices/" + encodeURIComponent(state.selectedID));
+        return renderDevices();
       }
-      $("accept-invite-input").value = "";
-      $("accept-invite-preview").hidden = true;
-      const saved = await saveConfiguration(false);
-      if (saved) showToast("Ami « " + (dec.name || "Pair") + " » ajouté !");
+      if (t.dataset.editDevice) {
+        const idx = (state.draft?.probes || []).findIndex((p) => p.id === t.dataset.editDevice);
+        if (idx >= 0) openWizard(idx);
+        return;
+      }
+      if (t.dataset.close) return closeModal(t.dataset.close);
+      if (t.dataset.reveal) {
+        const input = $(t.dataset.reveal);
+        if (!input) return;
+        const show = input.type === "password";
+        input.type = show ? "text" : "password";
+        t.textContent = show ? "Masquer" : "Afficher";
+        return;
+      }
+      if (t.dataset.pickKind) return showWizardForm(t.dataset.pickKind, {});
+      if (t.dataset.watchContainer) { setBusy(t, true); return watchContainers([t.dataset.watchContainer]); }
+      if (t.dataset.lanAdd) {
+        const it = (state.lanItems || []).find((x) => x.key === t.dataset.lanAdd);
+        if (it?.suggested_probe) showWizardForm(it.suggested_probe.kind, clone(it.suggested_probe));
+        return;
+      }
+      if (t.dataset.pal != null) return runPalette(Number(t.dataset.pal));
     });
-    $("friends-manual-btn")?.addEventListener("click", () => { $("friend-modal").hidden = false; });
-    $("friend-modal-close")?.addEventListener("click", () => { $("friend-modal").hidden = true; });
-    $("friend-modal-cancel")?.addEventListener("click", () => { $("friend-modal").hidden = true; });
-    $("friend-modal-save")?.addEventListener("click", async () => {
-      const name = ($("fm-name")?.value || "").trim() || "Ami";
-      const pk = ($("fm-pubkey")?.value || "").trim();
-      if (!/^[0-9a-fA-F]{64}$/.test(pk)) { showToast("Clé publique invalide (64 hex).", "err"); return; }
+
+    $$(".modal-backdrop").forEach((bd) => bd.addEventListener("mousedown", (e) => {
+      if (e.target === bd && bd.id !== "auth-gate" && bd.id !== "updating") closeModal(bd.id);
+    }));
+
+    $("theme-btn").addEventListener("click", () => applyTheme(state.theme === "dark" ? "light" : "dark"));
+    $("palette-btn").addEventListener("click", openPalette);
+    $("auth-form").addEventListener("submit", submitAuth);
+    $("welcome-form").addEventListener("submit", runWelcome);
+    window.addEventListener("hashchange", routeFromHash);
+
+    /* Accueil */
+    $("hero-run-btn").addEventListener("click", (e) => runAllNow(e.currentTarget));
+    $$("#home-filter button").forEach((b) => b.addEventListener("click", () => {
+      state.homeFilter = b.dataset.filter;
+      if (state.status) renderHome(state.status);
+    }));
+    $("update-strip-apply").addEventListener("click", triggerUpdate);
+
+    /* Appareils */
+    $("device-search").addEventListener("input", (e) => { state.deviceSearch = e.target.value; renderDevices(); });
+    $$(".tab[data-dtab]").forEach((t) => t.addEventListener("click", () => {
+      state.deviceTab = t.dataset.dtab;
+      try { localStorage.setItem(STORAGE.dtab, state.deviceTab); } catch {}
+      renderDevices();
+    }));
+    $("dd-test").addEventListener("click", (e) => testDevice(state.selectedID, e.currentTarget));
+    $("dd-edit").addEventListener("click", () => {
+      const idx = (state.draft?.probes || []).findIndex((p) => p.id === state.selectedID);
+      if (idx >= 0) openWizard(idx);
+    });
+    $("dd-more").addEventListener("click", () => {
+      const menu = $("dd-menu");
+      menu.hidden = !menu.hidden;
+      $("dd-more").setAttribute("aria-expanded", String(!menu.hidden));
+      if (!menu.hidden) menu.querySelector("button")?.focus();
+    });
+    $("dd-delete").addEventListener("click", () => { $("dd-menu").hidden = true; deleteDevice(state.selectedID); });
+
+    /* Assistant */
+    $("wizard-back").addEventListener("click", showWizardPick);
+    $("wizard-submit").addEventListener("click", wizardSubmit);
+    $("wizard-step-form").addEventListener("submit", (e) => { e.preventDefault(); wizardSubmit(); });
+    $("wizard-save-anyway").addEventListener("click", () => saveWizardProbe(readWizardProbe()));
+    $("found-lan-scan").addEventListener("click", runLANScan);
+    $("found-docker-all").addEventListener("click", (e) => {
+      setBusy(e.currentTarget, true);
+      watchContainers(state.dockerContainers.filter((c) => !c.monitored).map((c) => c.name)).finally(() => setBusy(e.currentTarget, false));
+    });
+
+    /* Amis */
+    $("invite-copy").addEventListener("click", () => { const c = encodeInvite(state.config); if (c) copyText(c, "Code copié. Envoyez-le à votre ami."); });
+    $("invite-share").addEventListener("click", () => {
+      const c = encodeInvite(state.config);
+      if (c && navigator.share) navigator.share({ title: "Mon code MeshWatch", text: "Ajoute-moi dans MeshWatch avec ce code : " + c }).catch(() => {});
+    });
+    $("accept-input").addEventListener("input", updateAcceptPreview);
+    $("accept-btn").addEventListener("click", acceptInvite);
+    $("manual-friend-btn").addEventListener("click", () => {
+      state.lastFocus = document.activeElement;
+      $("friend-modal").hidden = false;
+      setTimeout(() => $("fm-name").focus(), 30);
+    });
+    $("friend-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = val("fm-name") || "Ami";
+      const pk = val("fm-pubkey");
+      if (!/^[0-9a-fA-F]{64}$/.test(pk)) {
+        $("fm-pubkey").classList.add("invalid");
+        toast("La clé doit faire 64 caractères (0-9, a-f).", "err");
+        return;
+      }
       state.draft = ensureDraftShape(state.draft || state.config);
       state.draft.peers.push({ name, pubkey_hex: pk.toLowerCase() });
-      $("friend-modal").hidden = true;
-      const saved = await saveConfiguration(false);
-      if (saved) showToast("Ami ajouté !");
+      closeModal("friend-modal");
+      if (await saveConfiguration(false)) toast(name + " a été ajouté.");
     });
-    $("peer-drawer-backdrop")?.addEventListener("click", closePeerDrawer);
-    $("peer-drawer-close")?.addEventListener("click", closePeerDrawer);
+    $("peer-remove").addEventListener("click", removePeer);
 
-    $("alerts-save-btn")?.addEventListener("click", () => saveConfiguration(true));
-    $("settings-save-btn")?.addEventListener("click", () => saveConfiguration(true));
-    $("alerts-test-btn")?.addEventListener("click", runTestNotify);
-    $("photon-mode")?.addEventListener("change", () => { syncPhotonFieldsVisibility(); markDirty(); });
-    $("ntfy-gen-topic")?.addEventListener("click", () => {
-      const rand = Math.random().toString(36).slice(2, 10) + "-" + Math.random().toString(36).slice(2, 6);
-      $("ntfy-topic").value = "meshwatch-" + rand;
-      markDirty();
+    /* Alertes */
+    $("alerts-test-btn").addEventListener("click", runTestNotify);
+    $$('input[name="photon-mode"]').forEach((r) => r.addEventListener("change", syncPhotonMode));
+    $("ntfy-gen").addEventListener("click", () => { setVal("ntfy-topic", randomTopic()); setDirty(true); });
+    $("ntfy-copy").addEventListener("click", () => { if (val("ntfy-topic")) copyText(val("ntfy-topic"), "Nom du canal copié."); });
+    $("ntfy-enabled").addEventListener("change", () => {
+      if ($("ntfy-enabled").checked && !val("ntfy-topic")) setVal("ntfy-topic", randomTopic());
     });
-    $("copy-pubkey-btn")?.addEventListener("click", async () => {
-      const pk = $("set-pubkey")?.value || "";
-      if (pk) { try { await navigator.clipboard.writeText(pk); showToast("Clé publique copiée."); } catch {} }
+    $("automute-enabled").addEventListener("change", () => {
+      if ($("automute-enabled").checked && !splitLines($("set-automute-targets").value).length) setVal("set-automute-targets", "1.1.1.1:443\n9.9.9.9:443");
     });
-    $("regen-keys-btn")?.addEventListener("click", async () => {
+
+    /* Réglages */
+    $("set-update-check").addEventListener("click", () => checkUpdates(true));
+    $("set-update-apply").addEventListener("click", triggerUpdate);
+    $("backup-export").addEventListener("click", exportBackup);
+    $("backup-import-btn").addEventListener("click", () => $("backup-import").click());
+    $("backup-import").addEventListener("change", (e) => importBackup(e.target.files?.[0]));
+    $("copy-pubkey").addEventListener("click", () => { if (val("set-pubkey")) copyText(val("set-pubkey"), "Clé publique copiée."); });
+    $("regen-keys").addEventListener("click", async () => {
+      const ok = await confirmDialog("Régénérer les clés ?", "Vos amis ne vous reconnaîtront plus tant que vous ne leur aurez pas renvoyé votre nouveau code d'invitation.", "Régénérer");
+      if (!ok) return;
       const keys = await apiFetch("/api/keygen", { method: "POST", body: "{}" });
-      state.draft = ensureDraftShape(state.draft || state.config);
-      state.draft.node.private_key_hex = keys.private_key_hex;
-      state.draft.node.group_psk_hex = keys.group_psk_hex;
-      if ($("set-privkey")) $("set-privkey").value = keys.private_key_hex;
-      if ($("set-group-psk")) $("set-group-psk").value = keys.group_psk_hex;
-      markDirty();
-      showToast("Nouvelles clés générées — cliquez sur Enregistrer.", "warn");
+      setVal("set-privkey", keys.private_key_hex);
+      setVal("set-group-psk", keys.group_psk_hex);
+      setDirty(true);
+      toast("Nouvelles clés prêtes. Cliquez sur Enregistrer.", "warn");
     });
-    $("test-automute-btn")?.addEventListener("click", async () => {
-      const res = await apiFetch("/api/check-automute", { method: "POST", body: "{}" });
-      if ($("automute-result")) {
-        $("automute-result").textContent = res.muted ? "Internet coupé (auto-mute)" : "Internet joignable";
-      }
-    });
-    $("backup-export-btn")?.addEventListener("click", exportBackup);
-    $("backup-import-input")?.addEventListener("change", (e) => importBackupFile(e.target.files?.[0]));
-    $("raw-yaml-save-btn")?.addEventListener("click", async () => {
+    $("automute-test").addEventListener("click", async (e) => {
+      setBusy(e.currentTarget, true);
       try {
-        const res = await apiFetch("/api/config", { method: "PUT", body: JSON.stringify({ yaml: $("raw-yaml-editor").value }) });
-        state.config = ensureDraftShape(res.config);
-        state.draft = clone(state.config);
-        state.rawYAML = res.yaml || "";
-        state.dirty = false;
-        syncUnsavedBar();
-        renderConfigForms();
-        await fetchStatus();
-        showToast("YAML brut appliqué.");
-      } catch (e) {
-        showToast("Erreur YAML : " + e.message, "err");
+        const res = await apiFetch("/api/check-automute", { method: "POST", body: "{}" });
+        $("automute-result").textContent = res.muted ? "Internet ne répond pas" : "Internet répond";
+      } catch (err) {
+        $("automute-result").textContent = "Test impossible : " + err.message;
+      } finally {
+        setBusy(e.currentTarget, false);
       }
     });
-
-    document.querySelectorAll("[data-toggle-secret]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const inp = $(btn.dataset.toggleSecret);
-        if (!inp) return;
-        const hide = inp.type === "text";
-        inp.type = hide ? "password" : "text";
-        btn.textContent = hide ? "Afficher" : "Masquer";
-      });
+    $("raw-yaml-apply").addEventListener("click", async () => {
+      const ok = await confirmDialog("Appliquer ce fichier ?", "La configuration sera remplacée par le contenu de l'éditeur.", "Appliquer");
+      if (ok) applyYAML($("raw-yaml").value, "Fichier appliqué.");
     });
 
-    ["#view-alerts input, #view-alerts select, #view-settings input, #view-settings textarea"].forEach((sel) => {
-      document.querySelectorAll(sel).forEach((el) => {
-        if (el.type === "file" || el.readOnly) return;
-        el.addEventListener("change", markDirty);
-      });
+    /* Modifications non enregistrées */
+    $$("[data-dirty]").forEach((el) => {
+      el.addEventListener("input", () => setDirty(true));
+      el.addEventListener("change", () => setDirty(true));
     });
-    $("unsaved-save-btn")?.addEventListener("click", () => saveConfiguration(true));
-    $("unsaved-discard-btn")?.addEventListener("click", () => {
+    $("savebar-save").addEventListener("click", (e) => { setBusy(e.currentTarget, true); saveConfiguration(true).finally(() => setBusy(e.currentTarget, false)); });
+    $("savebar-discard").addEventListener("click", () => {
       state.draft = clone(state.config || {});
-      state.dirty = false;
       renderConfigForms();
-      syncUnsavedBar();
+      setDirty(false);
+    });
+    window.addEventListener("beforeunload", (e) => {
+      if (state.dirty) { e.preventDefault(); e.returnValue = ""; }
     });
 
-    $("cmd-palette-btn")?.addEventListener("click", openPalette);
-    $("cmd-palette")?.addEventListener("click", (e) => { if (e.target === $("cmd-palette")) closePalette(); });
-    $("palette-input")?.addEventListener("input", (e) => renderPaletteList(e.target.value));
-    $("palette-input")?.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        state.paletteIndex = Math.min(state.paletteItems.length - 1, state.paletteIndex + 1);
-        highlightPaletteItem(state.paletteIndex);
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        state.paletteIndex = Math.max(0, state.paletteIndex - 1);
-        highlightPaletteItem(state.paletteIndex);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        const item = state.paletteItems[state.paletteIndex];
-        closePalette();
-        if (item) item.run();
-      } else if (e.key === "Escape") {
-        closePalette();
-      }
+    /* Confirmation */
+    $("confirm-ok").addEventListener("click", () => {
+      $("confirm-modal").hidden = true;
+      if (state.confirmResolve) { state.confirmResolve(true); state.confirmResolve = null; }
     });
-    $("shortcut-modal-close")?.addEventListener("click", () => { $("shortcut-modal").hidden = true; });
+    $("confirm-cancel").addEventListener("click", () => closeModal("confirm-modal"));
 
+    /* Palette */
+    $("palette-input").addEventListener("input", (e) => renderPalette(e.target.value));
+    $("palette-input").addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); movePalette(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); movePalette(-1); }
+      else if (e.key === "Enter") { e.preventDefault(); runPalette(state.paletteIndex); }
+    });
+
+    /* Clavier */
     document.addEventListener("keydown", (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        state.paletteOpen ? closePalette() : openPalette();
+        if ($("palette").hidden) openPalette();
+        else closeModal("palette");
         return;
       }
       if (e.key === "Escape") {
-        closePalette();
-        closePeerDrawer();
-        if ($("probe-modal")) $("probe-modal").hidden = true;
-        if ($("friend-modal")) $("friend-modal").hidden = true;
-        if ($("shortcut-modal")) $("shortcut-modal").hidden = true;
+        if (!$("dd-menu").hidden) { $("dd-menu").hidden = true; $("dd-more").focus(); return; }
+        const top = topOverlay();
+        if (top && top !== "auth-gate") { e.preventDefault(); closeModal(top); }
         return;
       }
       const tag = (e.target?.tagName || "").toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (tag === "input" || tag === "textarea" || tag === "select" || e.target?.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (topOverlay() || !$("welcome").hidden) return;
 
       const k = e.key.toLowerCase();
       if (state.keySeq === "g") {
         state.keySeq = "";
         clearTimeout(state.keySeqTimer);
-        if (k === "1") return switchTab("home");
-        if (k === "2") return switchTab("discover");
-        if (k === "3") return switchTab("friends");
-        if (k === "4") return switchTab("alerts");
-        if (k === "5") return switchTab("settings");
+        const idx = Number(k) - 1;
+        if (idx >= 0 && idx < TABS.length) switchTab(TABS[idx]);
+        return;
       }
       if (k === "g") {
         state.keySeq = "g";
         clearTimeout(state.keySeqTimer);
         state.keySeqTimer = setTimeout(() => { state.keySeq = ""; }, 900);
-        return;
-      }
-      if (k === "?") {
-        if ($("shortcut-modal")) $("shortcut-modal").hidden = false;
+      } else if (e.key === "?") {
+        state.lastFocus = document.activeElement;
+        $("shortcuts").hidden = false;
+      } else if (k === "n") {
+        e.preventDefault();
+        openWizard();
       } else if (k === "r") {
-        runAllProbesNow();
-      } else if (k === "t" && state.tab === "home" && state.selectedProbeID) {
-        quickTestProbeByID(state.selectedProbeID);
-      } else if (k === "e" && state.tab === "home" && state.selectedProbeID) {
-        editProbeByID(state.selectedProbeID);
-      } else if ((k === "j" || k === "k") && state.tab === "home") {
-        const rows = Array.from(document.querySelectorAll("#fleet-tbody tr[data-select-probe]"));
-        if (!rows.length) return;
-        const cur = rows.findIndex((r) => r.dataset.selectProbe === state.selectedProbeID);
-        const nextIdx = k === "j" ? Math.min(rows.length - 1, cur + 1) : Math.max(0, cur - 1);
-        selectProbe(rows[nextIdx].dataset.selectProbe);
+        runAllNow();
+      } else if ((k === "j" || k === "k") && (state.tab === "devices" || state.tab === "home")) {
+        const list = sortDevices(deviceList());
+        if (!list.length) return;
+        const cur = list.findIndex((d) => d.id === state.selectedID);
+        const next = k === "j" ? Math.min(list.length - 1, cur + 1) : Math.max(0, cur - 1);
+        openDevice(list[next < 0 ? 0 : next].id);
+      } else if (k === "t" && state.tab === "devices" && state.selectedID) {
+        testDevice(state.selectedID, $("dd-test"));
+      } else if (k === "e" && state.tab === "devices" && state.selectedID) {
+        $("dd-edit").click();
       }
     });
   }
